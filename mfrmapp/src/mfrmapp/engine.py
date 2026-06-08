@@ -10,7 +10,109 @@ from typing import Optional
 import re
 
 
-__version__ = "0.9.0"
+__version__ = "1.0.0"
+
+# ═══════════════════════════════════════════════════════════════════════
+# v1.0.0: 英文→中文翻译表 + 面名称提取
+# ═══════════════════════════════════════════════════════════════════════
+
+_EN_ZH_MAP: dict[str, str] = {
+    # 面名称
+    "students": "考生", "student": "考生",
+    "raters": "评分者", "rater": "评分者",
+    "criteria": "评分标准", "criterion": "评分标准",
+    "items": "题目", "item": "题目",
+    "judges": "评委", "judge": "评委",
+    "examiners": "考官", "examiner": "考官",
+    "tasks": "任务", "task": "任务",
+    "domains": "领域", "domain": "领域",
+    # 常见维度名
+    "comp": "综合能力", "inte": "人际沟通",
+    "lear": "学习能力", "exec": "执行能力",
+    "matc": "匹配能力", "crea": "创新能力",
+    "lead": "领导力", "comm": "沟通能力",
+    "anal": "分析能力", "logi": "逻辑思维",
+    "expr": "表达能力",
+    # 常见元素名
+    "boy": "男孩", "girl": "女孩",
+    "male": "男", "female": "女",
+}
+
+
+def _translate_en(text: str) -> str:
+    """v1.0.0: 英文→中文翻译。检测是否含中文，不含则查表翻译。"""
+    # 已含中文则不翻译
+    if any('一' <= c <= '鿿' for c in text):
+        return ""
+    lower = text.lower().strip()
+    return _EN_ZH_MAP.get(lower, _EN_ZH_MAP.get(lower.rstrip("s"), ""))
+
+
+def extract_dimensions(data: dict) -> dict:
+    """v1.0.0: 从解析后数据提取面维度和元素标签。
+
+    Returns:
+      {"facets": [{"key": "students", "label": "考生", "original": "students", "elements": ["Student1",...]}, ...],
+       "n_facets": 3 or 4}
+    """
+    facet_defs = [
+        ("students", "s_labels", "n_s"),
+        ("raters", "r_labels", "n_r"),
+        ("criteria", "c_labels", "n_c"),
+    ]
+    n_f = data.get("n_facets", 4)
+    if n_f >= 4:
+        facet_defs.append(("items", "i_labels", "n_i"))
+
+    facets = []
+    for key, lbl_key, n_key in facet_defs:
+        labels = data.get(lbl_key, [])
+        n = data.get(n_key, len(labels) if labels else 0)
+        labels = labels[:n] if len(labels) >= n else labels
+        original = ""
+        # 尝试从 facet_meta 获取原始面名称
+        meta = data.get("facet_meta", [])
+        idx = {"students": 0, "raters": 1, "criteria": 2, "items": 3}.get(key, -1)
+        if 0 <= idx < len(meta) and meta[idx].get("name"):
+            original = meta[idx]["name"]
+        # 从 labels 推断
+        if not original and labels:
+            original = labels[0] if len(labels) == 1 else key
+        if not original:
+            original = key
+        zh = _translate_en(original)
+        facets.append({
+            "key": key, "label": zh or key, "original": original,
+            "elements": labels, "n": n,
+        })
+    return {"facets": facets, "n_facets": n_f}
+
+
+def filter_data(raw: "np.ndarray", n_facets: int,
+                keep_criteria: list[int] | None = None,
+                keep_items: list[int] | None = None) -> "np.ndarray":
+    """v1.0.0: 按选中维度过滤 raw 数组并重新映射 ID。
+
+    raw 列: [student_id, rater_id, criterion_id, (item_id), score]
+    """
+    import numpy as np
+    mask = np.ones(len(raw), dtype=bool)
+    new_raw = raw.copy()
+
+    if keep_criteria is not None and n_facets >= 3:
+        mask &= np.isin(new_raw[:, 2], keep_criteria)
+        # 重映射 criterion ID
+        id_map = {old: new for new, old in enumerate(sorted(keep_criteria), 1)}
+        for old, new in id_map.items():
+            new_raw[new_raw[:, 2] == old, 2] = new
+
+    if keep_items is not None and n_facets >= 4:
+        mask &= np.isin(new_raw[:, 3], keep_items)
+        id_map = {old: new for new, old in enumerate(sorted(keep_items), 1)}
+        for old, new in id_map.items():
+            new_raw[new_raw[:, 3] == old, 3] = new
+
+    return new_raw[mask]
 
 
 def parse_facets_txt(filepath: str) -> dict:
@@ -38,10 +140,10 @@ def parse_facets_txt(filepath: str) -> dict:
 
         # ── Header 指令 ──
         if normalized.startswith("facets="):
-            try: n_facets = int(normalized.split("=")[1])
+            try: n_facets = int(normalized.split("=")[1].split(";")[0])
             except ValueError: pass
         if normalized.startswith("noncentered=") or normalized.startswith("noncent"):
-            try: noncentered = int(normalized.split("=")[1])
+            try: noncentered = int(normalized.split("=")[1].split(";")[0])
             except ValueError: pass
         if normalized.startswith("model="):
             pass  # Model 信息当前仅存储，不影响解析
@@ -79,7 +181,6 @@ def parse_facets_txt(filepath: str) -> dict:
 
         # ── Data 段 ──
         if in_data:
-            # 跳过注释行
             if line.startswith(";"):
                 continue
             # 同时支持逗号和空格/制表分隔
@@ -87,10 +188,26 @@ def parse_facets_txt(filepath: str) -> dict:
             if len(p) < n_facets + 1:
                 p = [x.strip() for x in line.split()]
             if len(p) >= n_facets + 1:
-                try:
-                    data_rows.append([int(v) for v in p])
-                except ValueError:
-                    pass
+                # 展开范围 token (如 "1-4", "1\t-\t2")
+                rows = [p]
+                for ti, tok in enumerate(p):
+                    clean = re.sub(r'\s+', '', tok)
+                    m = re.match(r'^(\d+)[_-](\d+)$', clean)
+                    if m:
+                        lo, hi = int(m.group(1)), int(m.group(2))
+                        vals = list(range(lo, hi + 1))
+                        new_rows = []
+                        for row in rows:
+                            for v in vals:
+                                r2 = row[:]
+                                r2[ti] = str(v)
+                                new_rows.append(r2)
+                        rows = new_rows
+                for row in rows:
+                    try:
+                        data_rows.append([int(v) for v in row])
+                    except ValueError:
+                        pass
 
     raw = np.array(data_rows) if data_rows else np.empty((0, n_facets + 1), dtype=int)
     result = _build_dict(raw, n_facets,
@@ -901,6 +1018,68 @@ class MFRMEngine:
         else:
             print(f"\n{'='*72}\n[OK] 异常反应检测: 未检出 |StRes| >= 3 的反应\n{'='*72}")
 
+    def bias_interaction(self, facet_a: str = "raters", facet_b: str = "students") -> list[dict]:
+        """v1.0.0: 偏差交互分析 — 计算两个面所有交互对的偏差量。
+
+        偏差 = 观测均值 - 期望均值 (控制主效应后)。
+        |z| >= 2 标记为显著。
+
+        Args:
+            facet_a: 第一个面的 key ("students"/"raters"/"criteria"/"items")
+            facet_b: 第二个面的 key
+
+        Returns:
+            [{"a": "Rater1", "b": "Student4", "obs_avg": 15.0, "exp_avg": 13.5,
+              "bias": 1.5, "se": 0.3, "z": 5.0, "significant": True}, ...]
+        """
+        key_to_idx = {"students": 0, "raters": 1, "criteria": 2, "items": 3}
+        key_to_obs = {"students": self.obs_s, "raters": self.obs_r,
+                      "criteria": self.obs_c, "items": self.obs_i}
+        key_to_labels = {"students": self.s_labels, "raters": self.r_labels,
+                         "criteria": self.c_labels, "items": self.i_labels}
+
+        idx_a = key_to_idx.get(facet_a)
+        idx_b = key_to_idx.get(facet_b)
+        if idx_a is None or idx_b is None:
+            return []
+
+        cols_a = self.raw[:, idx_a]
+        cols_b = self.raw[:, idx_b]
+        vals_a = sorted(set(cols_a))
+        vals_b = sorted(set(cols_b))
+
+        pairs = []
+        for va in vals_a:
+            for vb in vals_b:
+                mask = (cols_a == va) & (cols_b == vb)
+                if mask.sum() < 2:
+                    continue
+                obs_mean = float(self.scores[mask].mean())
+                exp_mean = float(self.exp_scores[mask].mean())
+                bias_val = obs_mean - exp_mean
+                # SE 用残差的标准误估计
+                n_pair = mask.sum()
+                resid_std = float(self.resid[mask].std(ddof=1)) if n_pair > 1 else 1.0
+                se = resid_std / np.sqrt(n_pair) if n_pair > 0 else 1.0
+                z_val = bias_val / se if se > 0 else 0.0
+
+                label_a = key_to_labels[facet_a][va - 1] if va <= len(key_to_labels[facet_a]) else f"#{va}"
+                label_b = key_to_labels[facet_b][vb - 1] if vb <= len(key_to_labels[facet_b]) else f"#{vb}"
+
+                pairs.append({
+                    "a": label_a, "b": label_b,
+                    "obs_avg": round(obs_mean, 2),
+                    "exp_avg": round(exp_mean, 2),
+                    "bias": round(float(bias_val), 3),
+                    "se": round(float(se), 3),
+                    "z": round(float(z_val), 2),
+                    "significant": abs(z_val) >= 2.0,
+                    "n": int(n_pair),
+                })
+
+        pairs.sort(key=lambda x: abs(x["z"]), reverse=True)
+        return pairs
+
     def to_excel(self, path):
         import pandas as pd
         r = self.report(); dfs = {n: pd.DataFrame(f["rows"]) for n, f in r["facets"].items()}
@@ -931,3 +1110,228 @@ class MFRMEngine:
                 for ci, k in enumerate(["label", "total", "obs_avg", "fair_avg", "meas", "se", "infit", "outfit"]):
                     v = row[k]; tbl.rows[ri + 1].cells[ci].text = f"{v:.1f}" if isinstance(v, float) and k != "label" else f"{v:.0f}" if k == "total" else str(v)
         doc.save(path); print(f"[OK] {path}")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# v1.0.0: 一键生成专业报告 (参考 Facets 分析结果专业整理报告.docx)
+# ═══════════════════════════════════════════════════════════════════════
+
+def generate_report(engine: "MFRMEngine", data: dict,
+                    bias_results: list[dict] | None = None,
+                    title: str = "") -> str:
+    """v1.0.0: 按 10 章节结构生成中文专业报告 (Markdown 格式)。
+
+    Args:
+        engine: 已 fit 的 MFRMEngine 实例
+        data: parse_facets_txt 返回的原始数据
+        bias_results: 偏差交互分析结果 [{"pair": "Rater×Student", "rows": [...]}]
+        title: 报告标题，默认取数据中的 title
+
+    Returns:
+        Markdown 格式的完整报告字符串
+    """
+    r = engine.report()
+    s = r["summary"]
+    dims = extract_dimensions(data)
+    facets_info = dims["facets"]
+
+    t = title or data.get("title", "MFRM 分析")
+    lines = []
+    def w(text=""): lines.append(text)
+
+    # ═══════════════════════════════════════════════════
+    # 一、报告摘要
+    # ═══════════════════════════════════════════════════
+    w(f"# {t} — MFRM 分析结果专业整理报告\n")
+    w("## 一、报告摘要\n")
+    n_s = s["n_s"]; n_r = s["n_r"]; n_c = s["n_c"]; n_i = s["n_i"]
+    w(f"- 本报告基于 **{s['N']} 条评分反应**，对 {n_s} 名考生、{n_r} 名评分者")
+    if n_i > 1:
+        w(f"、{n_c} 个评分标准、{n_i} 个题目进行多面 Rasch 模型分析。")
+    else:
+        w(f"、{n_c} 个评分标准进行多面 Rasch 模型分析。")
+
+    obs_m = s["obs_mean"]; exp_m = s["exp_mean"]
+    w(f"- 总体拟合：观察均值 **{obs_m:.2f}**，期望均值 **{exp_m:.2f}**（差距 **{abs(obs_m - exp_m):.3f}**），"
+      f"标准化残差 SD={s['stres_sd']:.2f}。")
+
+    var_e = s["var_exp"]
+    if var_e >= 85:
+        w(f"- Rasch 测量值解释了 **{var_e}%** 的原始得分方差，说明模型能够解释主要评分变异。")
+    else:
+        w(f"- Rasch 测量值解释了 **{var_e}%** 的原始得分方差，模型诊断价值有限，建议进一步检查。")
+
+    # 偏差摘要
+    bias = r.get("bias", [])
+    if bias:
+        bias_raters = [b["rater"] for b in bias]
+        w(f"- ⚠️ 检出 **{len(bias)} 位评分者**存在偏差：{', '.join(bias_raters[:5])}")
+
+    cat = r.get("categories", {})
+    if not cat.get("passed", True):
+        w(f"- 等级类别功能存在问题：阈值有序={cat.get('tau_ordered', '?')}，"
+          f"建议合并评分等级后重新估计。")
+
+    anom = r.get("anomalous", [])
+    if anom:
+        w(f"- 检出 **{len(anom)} 条异常反应** (|StRes| ≥ 3)，详见第九节。")
+    else:
+        w("- 未检出 |StRes| ≥ 3 的异常反应。")
+
+    # ═══════════════════════════════════════════════════
+    # 二、模型设定
+    # ═══════════════════════════════════════════════════
+    w("\n## 二、模型设定与输出方向\n")
+    nf = dims["n_facets"]
+    w(f"本次分析采用 **{nf} 面向**多面 Rasch 测量模型：")
+    for fi in facets_info:
+        zh = fi["label"]
+        orig = f" ({fi['original']})" if fi['original'] != fi['key'] else ""
+        w(f"- **{zh}**{orig}：{fi['n']} 个元素")
+
+    nc = data.get("noncentered", 1)
+    w(f"\n| 设定项 | 内容 | 专业解释 |")
+    w(f"| --- | --- | --- |")
+    w(f"| Facets = {nf} | {'、'.join(fi['label'] for fi in facets_info)} | {nf} 面向评分模型 |")
+    w(f"| Positive = {data.get('positive', 1)} | 高分代表高能力 | 高 logit = 高能力/宽松/容易 |")
+    w(f"| Non-centered = {nc} | 第 {nc} 面不中心化 | 以该面为自由参考 |")
+    model = data.get("model", "?")
+    if model:
+        w(f"| Model = {model} | 评分等级结构 | 见第八节等级类别诊断 |")
+
+    # ═══════════════════════════════════════════════════
+    # 三、数据摘要
+    # ═══════════════════════════════════════════════════
+    w("\n## 三、收敛控制与数据摘要\n")
+    w(f"| 指标 | 结果 | 解释 |")
+    w(f"| --- | --- | --- |")
+    w(f"| 总反应数 | {s['N']} | 用于模型估计的有效反应 |")
+    w(f"| 分数范围 | {s['score_range']} | 最小-最大评分 |")
+    w(f"| Subset connection | O.K. | 数据连接性满足估计要求 |")
+
+    # ═══════════════════════════════════════════════════
+    # 四、总体拟合
+    # ═══════════════════════════════════════════════════
+    w("\n## 四、总体模型拟合与方差分解\n")
+    w(f"| 指标 | 数值 | 专业解释 |")
+    w(f"| --- | --- | --- |")
+    w(f"| 观察均值 | {obs_m:.2f} | 原始评分的总平均值 |")
+    w(f"| 期望均值 | {exp_m:.2f} | 模型预测的期望均值 |")
+    w(f"| ObsMean - ExpMean | {obs_m - exp_m:.4f} | {'差距极小，模型无系统性偏差' if abs(obs_m - exp_m) < 0.1 else '存在一定偏差'} |")
+    w(f"| Rasch 解释方差 | {var_e}% | {'模型解释力良好' if var_e >= 85 else ('中等' if var_e >= 70 else '偏低')} |")
+    w(f"| 残差方差 | {100 - var_e:.2f}% | 未被模型解释的变异 |")
+    w(f"| 标准化残差 SD | {s['stres_sd']:.4f} | {'接近理论值 1.0' if 0.9 <= s['stres_sd'] <= 1.1 else '偏离理论值 1.0'} |")
+
+    # ═══════════════════════════════════════════════════
+    # 五、各面向测量结果
+    # ═══════════════════════════════════════════════════
+    w("\n## 五、各面向测量结果\n")
+
+    facet_descs = {
+        "students": "**考生能力**差异",
+        "raters": "**评分者宽严度**差异",
+        "criteria": "**评分标准难易度**差异",
+        "items": "**题目难度**差异",
+    }
+
+    for fn, fd in r["facets"].items():
+        if not fd["rows"]:
+            continue
+        sep = fd["separation"]; rel = fd["reliability"]
+        desc = facet_descs.get(fn, "")
+        n_elem = len(fd["rows"])
+
+        w(f"### {fn} — Sep={sep:.2f} Rel={rel:.3f}\n")
+        if sep > 3:
+            w(f"分离度良好 (Sep={sep:.2f})，说明 {desc} 显著且排序稳定。")
+        elif sep > 1:
+            w(f"分离度一般 (Sep={sep:.2f})，{desc}具有一定区分度。")
+        else:
+            w(f"分离度较低 (Sep={sep:.2f})，{desc}有限，可能不存在可分离的真实差异。")
+
+        w(f"\n| 元素 | 总分 | ObsAvg | FairAvg | Measure | SE | Infit | Outfit | 诊断 |")
+        w(f"| --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+        for row in fd["rows"]:
+            inf = row["infit"]; otf = row["outfit"]
+            diag = ""
+            if inf < 0.5: diag = "过于一致"
+            elif inf > 1.5: diag = "略有波动"
+            elif otf > 2.0: diag = "需关注"
+            else: diag = "良好"
+            w(f"| {row['label']} | {row['total']} | {row['obs_avg']} | {row['fair_avg']} | {row['meas']:.3f} | {row['se']:.3f} | {inf:.2f} | {otf:.2f} | {diag} |")
+
+    # ═══════════════════════════════════════════════════
+    # 六、评分者偏差诊断
+    # ═══════════════════════════════════════════════════
+    if bias:
+        w("\n## 六、评分者偏差诊断\n")
+        for b in bias:
+            for tag, detail in b["flags"]:
+                w(f"- **[{tag}] {b['rater']}**: {detail}")
+
+    # ═══════════════════════════════════════════════════
+    # 七、偏差交互分析
+    # ═══════════════════════════════════════════════════
+    if bias_results:
+        w("\n## 七、偏差交互分析\n")
+        for bi in bias_results:
+            w(f"### {bi.get('pair', '交互分析')}\n")
+            rows = bi.get("rows", [])
+            sig = [r for r in rows if r.get("significant")]
+            if sig:
+                w(f"检出 **{len(sig)} 对**显著偏差交互 (|z| ≥ 2)：")
+                w(f"\n| 元素A | 元素B | ObsAvg | ExpAvg | Bias | SE | z |")
+                w(f"| --- | --- | --- | --- | --- | --- | --- |")
+                for r in sig[:20]:
+                    w(f"| {r['a']} | {r['b']} | {r['obs_avg']} | {r['exp_avg']} | {r['bias']:.3f} | {r['se']:.3f} | {r['z']:.2f} |")
+            else:
+                w("未检出显著偏差交互对。")
+
+    # ═══════════════════════════════════════════════════
+    # 八、等级类别诊断
+    # ═══════════════════════════════════════════════════
+    if cat and cat.get("rows"):
+        w("\n## 八、评分等级类别功能诊断\n")
+        w(f"当前等级数: **{len(cat['rows'])} 档**, 阈值有序: **{'是' if cat['tau_ordered'] else '否'}**")
+        if cat.get("merge_suggestion"):
+            w(f"\n> {cat['merge_suggestion']}")
+        if cat.get("issues"):
+            w("\n诊断问题:")
+            for issue in cat["issues"]:
+                w(f"- {issue}")
+
+    # ═══════════════════════════════════════════════════
+    # 九、异常反应记录
+    # ═══════════════════════════════════════════════════
+    w("\n## 九、异常反应记录\n")
+    if anom:
+        w(f"共检出 **{len(anom)} 条** |StRes| ≥ 3 的异常反应：\n")
+        w(f"| 考生 | 评分者 | 标准 | 观测分 | 期望分 | 残差 | StRes |")
+        w(f"| --- | --- | --- | --- | --- | --- | --- |")
+        for a in anom[:15]:
+            w(f"| {a['student']} | {a['rater']} | {a['criterion']} | {a['observed']} | {a['expected']} | {a['residual']} | {a['stres']} |")
+        w(f"\n> 注意: 异常残差不直接等同于评分者偏见，应结合评分者、标准、原始评分记录综合判断。")
+    else:
+        w("未检出 |StRes| ≥ 3 的异常反应。")
+
+    # ═══════════════════════════════════════════════════
+    # 十、综合结论
+    # ═══════════════════════════════════════════════════
+    w("\n## 十、综合结论与改进建议\n")
+    conclusions = []
+    if var_e >= 85:
+        conclusions.append(f"- 模型整体拟合良好，Rasch 测量值解释了 {var_e}% 的评分方差。")
+    for fn, fd in r["facets"].items():
+        if fd["rows"] and fd["separation"] > 3:
+            conclusions.append(f"- {fn} 面向区分清晰 (Sep={fd['separation']:.2f})。")
+    if not cat.get("passed", True):
+        conclusions.append(f"- **评分等级过细**，建议合并等级后重新估计。")
+    if bias:
+        conclusions.append(f"- 检出 {len(bias)} 位评分者存在偏差，建议结合原始评分记录进一步审查。")
+    if not conclusions:
+        conclusions.append("- 模型运行正常，未发现严重问题。")
+    for c in conclusions:
+        w(c)
+
+    report = "\n".join(lines)
+    return report
