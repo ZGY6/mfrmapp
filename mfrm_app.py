@@ -131,14 +131,14 @@ def parse_minifac_txt(path: str) -> dict:
             if lower.startswith("title=") or lower.startswith("title "):
                 title = line.split("=", 1)[1].strip()
             elif lower.startswith("facets=") or lower.startswith("facets "):
-                n_facets = int(line.split("=", 1)[1].strip().split()[0])
+                n_facets = int(line.split("=", 1)[1].split(";")[0].strip().split()[0])
             elif lower.startswith("models=") or lower.startswith("model=") or lower.startswith("model "):
-                model = line.split("=", 1)[1].strip()
+                model = line.split("=", 1)[1].split(";")[0].strip()
             elif lower.startswith("positive=") or lower.startswith("positive "):
-                try: positive = int(line.split("=", 1)[1].strip().split(",")[0])
+                try: positive = int(line.split("=", 1)[1].split(";")[0].strip().split(",")[0])
                 except: pass
             elif lower.startswith("noncent") and "=" in line:
-                try: noncentered = int(line.split("=", 1)[1].strip())
+                try: noncentered = int(line.split("=", 1)[1].split(";")[0].strip())
                 except: pass
             elif lower.startswith("inter-rater=") or lower.startswith("inter_rater="):
                 try: inter_rater = int(line.split("=", 1)[1].strip())
@@ -699,7 +699,7 @@ def parse_rating_scale_block(lines: list[str], start_idx: int) -> tuple[dict, in
 
 def _expand_range_token(token: str) -> list[int] | None:
     """展开范围 token: '2_4' → [2,3,4], '1-3' → [1,2,3], 纯数字 → [num]。无法解析返回 None。"""
-    token = token.strip()
+    token = re.sub(r'\s+', '', token.strip())
     if re.match(r'^\d+$', token):
         return [int(token)]
     m = re.match(r'^(\d+)[_-](\d+)$', token)
