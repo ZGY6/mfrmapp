@@ -47,28 +47,52 @@ def analyze(file):
     r = eng.report()
     s = r["summary"]
 
+    # 偏差统计
+    bias_count = len(r.get("bias", []))
+    bias_summary = ""
+    if bias_count > 0:
+        bias_types = set()
+        for b in r["bias"]:
+            for tag, _ in b["flags"]:
+                bias_types.add(tag)
+        bias_summary = f"\n[!] 检出 {bias_count} 位考官存在偏差: {', '.join(bias_types)}"
+
     # 摘要文本
     summary_text = (
         f"### 分析结果\n"
-        f"反应数: {s['N']} | 面向: {s['n_s']}学生×{s['n_r']}评分者×{s['n_c']}标准"
-        + (f"×{s['n_i']}题目" if s['n_i'] > 1 else "") + f"\n"
+        f"反应数: {s['N']} | 面向: {s['n_s']}学生 x {s['n_r']}评分者 x {s['n_c']}标准"
+        + (f" x {s['n_i']}题目" if s['n_i'] > 1 else "") + f"\n"
         f"分数范围: {s['score_range']} | 方差解释: {s['var_exp']}%\n"
         f"ObsMean={s['obs_mean']:.2f} | ExpMean={s['exp_mean']:.2f} | "
-        f"ResidSD={s['resid_sd']:.4f} | StResSD={s['stres_sd']:.4f}\n"
+        f"ResidSD={s['resid_sd']:.4f} | StResSD={s['stres_sd']:.4f}"
+        + bias_summary
     )
 
-    # 各面向的 DataFrames
+    # 各面向的 DataFrames, 评分者表附加偏差列
     dfs = {}
-    seps = {}
-    for key, emoji in [("students", "🎓"), ("raters", ""), ("criteria", "📋"), ("items", "📝")]:
+    bias_map = {b["rater"]: [t for t, _ in b["flags"]] for b in r.get("bias", [])}
+    for key, emoji in [("students", "🎓"), ("raters", "👤"), ("criteria", "📋"), ("items", "📝")]:
         fd = r["facets"].get(key)
         if fd and fd["rows"]:
             df = pd.DataFrame(fd["rows"])
-            df_display = df[["label", "total", "obs_avg", "meas", "se", "infit", "outfit"]].copy()
-            df_display.columns = ["名称", "总分", "ObsAvg", "Meas", "SE", "Infit", "Outfit"]
-            df_display["总分"] = df_display["总分"].astype(int)
+            cols = ["label", "total", "obs_avg", "meas", "se", "infit", "outfit"]
+            cn = ["名称", "总分", "ObsAvg", "Meas", "SE", "Infit", "Outfit"]
+            if key == "raters" and bias_map:
+                df["bias_flag"] = df["label"].apply(lambda x: ", ".join(bias_map.get(x, [])))
+                cols.append("bias_flag")
+                cn.append("偏差标记")
+            df_display = df[cols].copy()
+            df_display.columns = cn
+            if "总分" in df_display.columns:
+                df_display["总分"] = df_display["总分"].astype(int)
             dfs[f"{emoji} {key} (Sep={fd['separation']:.2f} Rel={fd['reliability']:.3f})"] = df_display
-            seps[key] = f"Sep={fd['separation']:.2f} Rel={fd['reliability']:.3f}"
+
+    # 排名对比表
+    rank_df = None
+    if r.get("rank_compare"):
+        rank_df = pd.DataFrame(r["rank_compare"])
+        rank_df.columns = ["考生", "原始总分", "FairAvg", "Meas", "原始排名", "校正排名", "排名变化"]
+        rank_df = rank_df[["考生", "原始总分", "FairAvg", "原始排名", "校正排名", "排名变化"]]
 
     # Excel 导出
     buf = pd.ExcelWriter(os.path.join(tempfile.gettempdir(), "mfrm_output.xlsx"), engine="openpyxl")
@@ -76,9 +100,16 @@ def analyze(file):
         if fd["rows"]:
             pd.DataFrame(fd["rows"]).to_excel(buf, sheet_name=k, index=False)
     pd.DataFrame([s]).to_excel(buf, sheet_name="summary", index=False)
+    if rank_df is not None:
+        rank_df.to_excel(buf, sheet_name="rank_compare", index=False)
     buf.close()
 
-    return summary_text, dfs.get(list(dfs.keys())[0] if dfs else None), dfs.get(list(dfs.keys())[1] if len(dfs) > 1 else None), dfs.get(list(dfs.keys())[2] if len(dfs) > 2 else None), dfs.get(list(dfs.keys())[3] if len(dfs) > 3 else None)
+    return (summary_text,
+            dfs.get(list(dfs.keys())[0] if dfs else None),
+            dfs.get(list(dfs.keys())[1] if len(dfs) > 1 else None),
+            dfs.get(list(dfs.keys())[2] if len(dfs) > 2 else None),
+            dfs.get(list(dfs.keys())[3] if len(dfs) > 3 else None),
+            rank_df)
 
 
 def build_interface():
@@ -101,13 +132,7 @@ def build_interface():
             with gr.Column(scale=1):
                 table1 = gr.DataFrame(label="🎓 学生")
             with gr.Column(scale=1):
-                rater_icon = gr.Image(
-                    value="https://raw.githubusercontent.com/ZGY6/mfrmapp/master/mfrmapp/src/mfrmapp/web/static/rater_icon.jpg",
-                    label="评分者", show_label=True, width=48, height=48,
-                    interactive=False, show_download_button=False,
-                    show_fullscreen_button=False, container=False,
-                )
-                table2 = gr.DataFrame(label="评分者数据")
+                table2 = gr.DataFrame(label="👤 评分者")
 
         with gr.Row():
             with gr.Column(scale=1):
@@ -115,13 +140,15 @@ def build_interface():
             with gr.Column(scale=1):
                 table4 = gr.DataFrame(label="📝 题目")
 
+        rank_table = gr.DataFrame(label="📊 原始 vs MFRM校正 排名对比")
+
         run_btn.click(
             fn=analyze,
             inputs=[file_input],
-            outputs=[summary, table1, table2, table3, table4],
+            outputs=[summary, table1, table2, table3, table4, rank_table],
         )
 
-        gr.Markdown("MFRMSight v0.8.0 · Andrich Rating Scale Model · Fisher-scoring JMLE")
+        gr.Markdown("MFRMSight v0.9.0 · Andrich Rating Scale Model · Fisher-scoring JMLE")
 
     return app
 

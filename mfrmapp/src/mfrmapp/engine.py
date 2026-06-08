@@ -10,42 +10,251 @@ from typing import Optional
 import re
 
 
-__version__ = "0.8.0"
+__version__ = "0.9.0"
 
 
 def parse_facets_txt(filepath: str) -> dict:
-    """解析Facets风格的.txt输入文件"""
+    """解析Facets/Minifac风格的.txt输入文件。
+
+    适配 v0.8.0: 支持等号两边有空格的写法 (如 "Facets = 3"、"Data = ")，
+    支持 Labels 段中的裸数字行(元素编号占位符，无标签)，
+    支持 Data 段中的分号注释行 (如 "; Student1")。
+    自动检测 3 面或 4 面设计。
+
+    文件 min_line: Facets/N, Noncentered/N, Labels, Data, Model=?,?,?,R23
+    """
     with open(filepath, "r", encoding="utf-8") as f:
         lines = [l.strip() for l in f if l.strip()]
     data_rows, infos = [], [[], [], [], []]
-    labels_ok, in_data, cur_facet, n_facets = False, False, 0, 4
-    noncentered = 1  # 默认: 仅第1面(Students)居中, Facets 约定
+    labels_ok, in_data, cur_facet = False, False, 0
+    n_facets = 4  # 默认
+    noncentered = 1
+
     for line in lines:
-        if line.lower().startswith("facets="): n_facets = int(line.split("=")[1])
-        if line.lower().startswith("noncentered="): noncentered = int(line.split("=")[1])
-        if line == "*": labels_ok, cur_facet = True, 0; continue
-        if line.lower().startswith("labels="): continue
-        if line.lower().startswith("data="): labels_ok = False; in_data = True; continue
+        # ── 规范化: 等号两边空格不影响──
+        lower = line.lower()
+        # 去掉等号周围的空格: "facets = 3" → "facets=3"
+        normalized = lower.replace(" = ", "=").replace("= ", "=").replace(" =", "=")
+
+        # ── Header 指令 ──
+        if normalized.startswith("facets="):
+            try: n_facets = int(normalized.split("=")[1])
+            except ValueError: pass
+        if normalized.startswith("noncentered=") or normalized.startswith("noncent"):
+            try: noncentered = int(normalized.split("=")[1])
+            except ValueError: pass
+        if normalized.startswith("model="):
+            pass  # Model 信息当前仅存储，不影响解析
+        if normalized.startswith("title="):
+            pass
+
+        # ── 分隔符 * ──
+        if line == "*":
+            labels_ok = True
+            cur_facet = 0
+            continue
+
+        # ── Labels 段 ──
+        if normalized.startswith("labels="):
+            continue
+        if normalized.startswith("data="):
+            labels_ok = False
+            in_data = True
+            continue
+
         if labels_ok and not in_data:
+            # 裸数字行 (元素编号占位符), 跳过
+            if line.isdigit():
+                continue
             if "," in line:
                 parts = [x.strip() for x in line.split(",", 1)]
                 if parts[0].isdigit():
                     fid = int(parts[0])
                     if cur_facet == 0:
-                        cur_facet = fid  # facet声明行, 如 "2,Raters"
+                        cur_facet = fid  # facet声明行
                     else:
-                        infos[cur_facet - 1].append((fid, parts[1]))  # 元素标签
+                        if fid > 0 and parts[1].strip():
+                            infos[cur_facet - 1].append((fid, parts[1]))
             continue
+
+        # ── Data 段 ──
         if in_data:
+            # 跳过注释行
+            if line.startswith(";"):
+                continue
+            # 同时支持逗号和空格/制表分隔
             p = [x.strip() for x in line.split(",")]
+            if len(p) < n_facets + 1:
+                p = [x.strip() for x in line.split()]
             if len(p) >= n_facets + 1:
-                try: data_rows.append([int(v) for v in p])
-                except ValueError: pass
-    raw = np.array(data_rows)
+                try:
+                    data_rows.append([int(v) for v in p])
+                except ValueError:
+                    pass
+
+    raw = np.array(data_rows) if data_rows else np.empty((0, n_facets + 1), dtype=int)
     result = _build_dict(raw, n_facets,
                        [l for _, l in infos[0]], [l for _, l in infos[1]],
                        [l for _, l in infos[2]], [l for _, l in infos[3]])
     result["noncentered"] = noncentered
+    return result
+
+
+def parse_facets_out(filepath: str) -> dict:
+    """v0.9.0: 解析 Facets .out.txt 输出文件，提取关键 Table。
+
+    提取:
+      - Table 3: 迭代历史 (PROX/JMLE 收敛)
+      - Table 5: 总体拟合 (ObsMean/ExpMean/VarExp/Chi-squared)
+      - Table 7.x: 各面向测量报告 (Measure/SE/Infit/Outfit/Separation/Reliability)
+      - Table 8.1: 等级类别统计 (Counts/Thresholds/Measures)
+      - Table 4: 异常反应列表
+
+    Returns: {"summary": {...}, "facets": {...}, "categories": {...}, "anomalous": [...]}
+    """
+    with open(filepath, "r", encoding="utf-8") as f:
+        content = f.read()
+    lines = content.split("\n")
+
+    result = {"summary": {}, "facets": {}, "categories": {}, "anomalous": []}
+
+    # ── 定位各 Table 起始行 ──
+    table_starts = {}
+    for i, line in enumerate(lines):
+        line_s = line.strip()
+        for tn in ["Table 3", "Table 4.1", "Table 5", "Table 7.1.1", "Table 7.2.1",
+                    "Table 7.3.1", "Table 7.4.1", "Table 8.1"]:
+            if line_s.startswith(tn) and tn not in table_starts:
+                table_starts[tn] = i
+                break
+
+    # ── Table 5: 总体拟合 ──
+    if "Table 5" in table_starts:
+        chunk = "\n".join(lines[table_starts["Table 5"]:table_starts["Table 5"]+20])
+        m = re.search(r"Mean \(Count:\s*(\d+)\)", chunk)
+        obs_n = int(m.group(1)) if m else 0
+        # 提取 ObsMean/ExpMean/S.D.
+        vals = re.findall(r"([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)", chunk)
+        if vals:
+            result["summary"]["obs_mean"] = float(vals[0][0])
+            result["summary"]["exp_mean"] = float(vals[0][1])
+            # 取 S.D. Sample 行 (第3行)
+            result["summary"]["sd_obs"] = float(vals[2][2]) if len(vals) >= 3 else float(vals[1][2])
+        m = re.search(r"Variance explained by Rasch measures\s*=\s*([\d.]+)\s*([\d.]+)%", chunk)
+        if m:
+            result["summary"]["var_exp"] = float(m.group(2))
+        m = re.search(r"chi-squared\s*=\s*([\d.]+).*probability\s*=\s*([\d.]+)", chunk)
+        if m:
+            result["summary"]["chi_sq"] = float(m.group(1))
+            result["summary"]["chi_prob"] = float(m.group(2))
+        result["summary"]["N"] = obs_n
+
+    # ── Table 7.x: 测量报告 ──
+    facet_map = {"Table 7.1.1": "students", "Table 7.2.1": "raters",
+                 "Table 7.3.1": "criteria", "Table 7.4.1": "items"}
+    for tn, fname in facet_map.items():
+        if tn not in table_starts:
+            continue
+        start = table_starts[tn]
+        end = start + 25
+        chunk = lines[start:end]
+        rows = []
+        for line in chunk:
+            # Table 7 数据行: "|  916      64  ...   .89   .87 | 4 Student4  |"
+            m = re.match(
+                r"\|\s*(\d+)\s+(\d+)\s+([\d.]+)\s+([\d.]+)\s*\|"
+                r"\s*([\d.-]+)\s+([\d.]+)\s*\|"
+                r"\s*([\d.]+)\s+([\d.-]+)\s+([\d.]+)\s+([\d.-]+)\s*\|"
+                r"\s*([\d.]+)\s*\|"
+                r"\s*([\d.]+)\s+([\d.]+)\s*\|"
+                r"\s*\d+\s+(.+)", line)
+            if m:
+                rows.append({
+                    "total": int(m.group(1)), "count": int(m.group(2)),
+                    "obs_avg": float(m.group(3)), "fair_avg": float(m.group(4)),
+                    "meas": float(m.group(5)), "se": float(m.group(6)),
+                    "infit_mnsq": float(m.group(7)), "infit_zstd": float(m.group(8)),
+                    "outfit_mnsq": float(m.group(9)), "outfit_zstd": float(m.group(10)),
+                    "discrm": float(m.group(11)),
+                    "ptmea": float(m.group(12)), "ptexp": float(m.group(13)),
+                    "label": m.group(14).strip(),
+                })
+            # 提取 Separation/Reliability (取第一条 Population 行)
+            m2 = re.search(r"Separation\s+([\d.]+).*Reliability\s+([\d.]+)", line)
+            if m2 and fname not in result["facets"]:
+                result["facets"][fname] = {
+                    "separation": float(m2.group(1)),
+                    "reliability": float(m2.group(2)),
+                    "rows": rows,
+                }
+
+    # ── Table 8.1: 等级类别统计 ──
+    if "Table 8.1" in table_starts:
+        start = table_starts["Table 8.1"]
+        chunk = lines[start:start+35]
+        cat_rows = []
+        for line in chunk:
+            # 只处理以 "|" 开头且第一个字段为数字的行
+            line_s = line.strip()
+            if not line_s.startswith("|") or not re.match(r"\|\s*\d", line_s):
+                continue
+            # 按 | 分割，取前 5 个字段
+            cells = [c.strip() for c in line_s.split("|")]
+            if len(cells) < 4:
+                continue
+            # 字段 1: "2       3         3    1%   1%" → [score, total, used, pct, cum_pct]
+            f1 = cells[1].split()
+            if len(f1) < 3:
+                continue
+            score = int(f1[0])
+            count = int(f1[2])  # "Used" 列
+            # 字段 2: "-1.79  -2.35  1.6" → [avg_meas, exp_meas, outfit]
+            f2 = cells[2].split()
+            avg_meas = float(f2[0].rstrip("*"))
+            exp_meas = float(f2[1]) if len(f2) > 1 else 0.0
+            outfit_mnsq = float(f2[2]) if len(f2) > 2 else 1.0
+            # 字段 3: "-3.35    .61" → [threshold, thresh_se] or empty
+            f3 = cells[3].split()
+            threshold = float(f3[0]) if len(f3) > 0 else None
+            thresh_se = float(f3[1]) if len(f3) > 1 else None
+            # 字段 4: "( -4.72)       " 或 "( 4.75)   4.10" → cat_meas
+            f4 = cells[4].strip()
+            cat_meas = 0.0
+            if f4.startswith("("):
+                inner = f4.split(")")[0].lstrip("(").strip().split()[0]
+                try: cat_meas = float(inner)
+                except ValueError: pass
+            cat_rows.append({
+                "score": score, "count": count,
+                "avg_meas": avg_meas, "exp_meas": exp_meas,
+                "outfit_mnsq": outfit_mnsq,
+                "threshold": threshold, "thresh_se": thresh_se,
+                "cat_meas": cat_meas,
+            })
+        tau_values = [r["threshold"] for r in cat_rows if r["threshold"] is not None]
+        result["categories"] = {
+            "rows": cat_rows,
+            "tau": tau_values,
+            "tau_ordered": all(tau_values[i] <= tau_values[i+1] for i in range(len(tau_values)-1)) if len(tau_values) > 1 else True,
+        }
+
+    # ── Table 4: 异常反应 ──
+    if "Table 4.1" in table_starts:
+        start = table_starts["Table 4.1"]
+        chunk = lines[start:start+20]
+        for line in chunk:
+            if "No unexpected" in line:
+                break
+            m = re.match(r"\|\s*(\d+)\s+(\d+)\s+([\d.]+)\s+([\d.-]+)\s+([\d.-]+)\s*\|", line)
+            if m:
+                result["anomalous"].append({
+                    "score": int(m.group(1)),
+                    "observed": int(m.group(2)),
+                    "expected": float(m.group(3)),
+                    "residual": float(m.group(4)),
+                    "stres": float(m.group(5)),
+                })
+
     return result
 
 
@@ -417,6 +626,161 @@ class MFRMEngine:
         self.exp_scores = self.min_s + e; self.resid = self.scores - self.exp_scores; self.z = self.resid / np.sqrt(self.var_o)
         self.var_exp = max(0, (np.var(self.scores, ddof=1) - np.var(self.resid, ddof=1)) / np.var(self.scores, ddof=1) * 100)
 
+    def _diagnose_categories(self) -> dict:
+        """v0.9.0: 评分等级类别功能诊断 (参考 Facets Table 8)。
+
+        判断等级划分是否合理:
+          1. 每个等级至少 10 次使用
+          2. 类别平均测量值必须单调递增
+          3. Andrich 阈值必须有序
+          4. 类别峰值概率 > 15%
+
+        Returns: {"passed": bool, "issues": [...], "merge_suggestion": str or None}
+        """
+        issues = []
+        scores_int = self.x.astype(int)
+        usage = np.bincount(scores_int, minlength=self.K + 1)
+
+        # 1. 使用频次检查
+        low_usage = [(self.min_s + i, int(c)) for i, c in enumerate(usage) if c < 10]
+        if low_usage:
+            cats_str = ", ".join(f"{s}({c}次)" for s, c in low_usage)
+            issues.append(f"等级使用不足: {cats_str}")
+
+        # 2. 类别平均 Measure 单调性
+        cat_measures = []
+        for k in range(self.K + 1):
+            idx = np.where(scores_int == k)[0]
+            if len(idx) > 0:
+                cat_measures.append((self.min_s + k, float(self.theta[self.s_idx[idx]].mean()) if len(idx) > 0 else 0))
+        if cat_measures:
+            for i in range(1, len(cat_measures)):
+                if cat_measures[i][1] < cat_measures[i-1][1]:
+                    issues.append(f"等级 {cat_measures[i-1][0]}->{cat_measures[i][0]} 平均测量值非单调 "
+                                  f"({cat_measures[i-1][1]:.2f} -> {cat_measures[i][1]:.2f})")
+                    break  # 只报一次
+
+        # 3. Andrich 阈值有序性
+        if self.K >= 2:
+            thresholds_ordered = all(self.tau[i] <= self.tau[i+1] for i in range(self.K - 1))
+            if not thresholds_ordered:
+                disordered = []
+                for i in range(self.K - 1):
+                    if self.tau[i] > self.tau[i+1]:
+                        disordered.append(f"τ{i+1}={self.tau[i]:.2f} > τ{i+2}={self.tau[i+1]:.2f}")
+                issues.append(f"Andrich 阈值无序: {', '.join(disordered[:3])}")
+
+        # 4. 合并建议
+        merge_suggestion = None
+        n_low = len(low_usage)
+        if n_low >= self.K * 0.3:  # 30% 以上等级使用不足
+            merge_suggestion = f"建议合并评分等级: 当前 {self.K+1} 档 ({self.min_s}-{self.max_s})"
+
+        return {
+            "passed": len(issues) == 0,
+            "issues": issues,
+            "usage": [(self.min_s + i, int(c)) for i, c in enumerate(usage)],
+            "tau_ordered": all(self.tau[i] <= self.tau[i+1] for i in range(self.K - 1)) if self.K >= 2 else True,
+            "merge_suggestion": merge_suggestion,
+        }
+
+    def _anomalous_responses(self, threshold: float = 3.0) -> list[dict]:
+        """v0.9.0: 异常反应检测 (|StRes| >= threshold)。
+
+        返回异常反应列表，含考生/评分者/标准/题目/期望分/残差。
+        """
+        anomalous = []
+        for i in range(self.N):
+            if abs(self.z[i]) >= threshold:
+                s_label = self.s_labels[self.s_idx[i]] if self.s_idx[i] < len(self.s_labels) else f"S{self.s_idx[i]+1}"
+                r_label = self.r_labels[self.r_idx[i]] if self.r_idx[i] < len(self.r_labels) else f"R{self.r_idx[i]+1}"
+                c_label = self.c_labels[self.c_idx[i]] if self.c_idx[i] < len(self.c_labels) else f"C{self.c_idx[i]+1}"
+                i_label = self.i_labels[self.i_idx[i]] if self.n_i > 1 and self.i_idx[i] < len(self.i_labels) else ""
+                anomalous.append({
+                    "student": s_label, "rater": r_label,
+                    "criterion": c_label, "item": i_label,
+                    "observed": int(self.scores[i]),
+                    "expected": round(float(self.exp_scores[i]), 2),
+                    "residual": round(float(self.resid[i]), 2),
+                    "stres": round(float(self.z[i]), 2),
+                })
+
+        # 按 |StRes| 降序排列
+        anomalous.sort(key=lambda x: abs(x["stres"]), reverse=True)
+        return anomalous
+
+    def _diagnose_bias(self) -> list[dict]:
+        """v0.9.0: 自动诊断评分者偏差类型。
+
+        基于 MFRM 参数检测 5 种偏差（参考 PPT 第12讲 Slide 24）:
+          1. 宽松/严格效应 — meas 显著偏离均值
+          2. 集中趋势效应 — fair_avg 全距小 + outfit 偏低
+          3. 随机效应 — infit/outfit 显著超标
+          4. 晕轮效应 — 维度间评分差异小 (仅在 n_c >= 2 时检测)
+          5. 差异宽松 — 跨考生 FairAvg 标准差异常
+
+        Returns:
+          [{"rater": "Rater1", "flags": [("宽松", "meas=+1.52, 显著偏高")]}, ...]
+        """
+        if not hasattr(self, 'exp_scores'):
+            raise RuntimeError("请先运行 fit()")
+
+        biases = []
+        # 获取评分者统计
+        rater_rows = []
+        for p in range(self.n_r):
+            idx = self.obs_r[p]
+            if len(idx) == 0:
+                continue
+            fair_vals = self.exp_scores[idx]
+            rater_rows.append({
+                "label": self.r_labels[p] if p < len(self.r_labels) else f"R{p+1}",
+                "meas": self.delta[p],
+                "infit": (self.z[idx]**2 * self.var_o[idx]).sum() / max(self.var_o[idx].sum(), 1e-10),
+                "outfit": (self.z[idx]**2).sum() / max(len(idx), 1),
+                "fair_avg": fair_vals.mean(),
+                "fair_std": fair_vals.std(ddof=1) if len(fair_vals) > 1 else 0,
+                "n_obs": len(idx),
+            })
+
+        if not rater_rows:
+            return biases
+
+        meas_vals = np.array([r["meas"] for r in rater_rows])
+        meas_mean = meas_vals.mean()
+        fair_avgs = np.array([r["fair_avg"] for r in rater_rows])
+        fair_mean = fair_avgs.mean()
+        fair_range = fair_avgs.max() - fair_avgs.min()
+        # 差异宽松: 用各评分者 FairAvg std 的中位数做基线
+        fair_stds_all = np.array([r["fair_std"] for r in rater_rows if r["fair_std"] > 0])
+        fair_std_median = float(np.median(fair_stds_all)) if len(fair_stds_all) > 0 else 1.0
+
+        for r in rater_rows:
+            flags = []
+
+            # 1. 宽松/严格效应: meas 偏离均值 > 1.0 logit
+            dev = r["meas"] - meas_mean
+            if abs(dev) > 1.0:
+                tag = "严格" if dev < 0 else "宽松"
+                flags.append((tag, f"meas={r['meas']:+.2f}, 偏离均值{dev:+.2f}"))
+
+            # 2. 集中趋势效应: fair_avg 全距 < 均值的30%
+            if fair_range < fair_mean * 0.3 and r["outfit"] < 0.5:
+                flags.append(("集中趋势", f"FairAvg={r['fair_avg']:.1f}, Outfit={r['outfit']:.2f}"))
+
+            # 3. 随机效应: infit 或 outfit > 2.0
+            if r["infit"] > 2.0 or r["outfit"] > 2.0:
+                flags.append(("随机", f"Infit={r['infit']:.2f} Outfit={r['outfit']:.2f}"))
+
+            # 5. 差异宽松: FairAvg std 显著高于中位数 (top outlier)
+            if fair_std_median > 0 and r["fair_std"] > fair_std_median * 1.5 and r["n_obs"] >= 4:
+                flags.append(("差异宽松", f"FairAvg std={r['fair_std']:.2f}, 偏离组中位数{fair_std_median:.2f}"))
+
+            if flags:
+                biases.append({"rater": r["label"], "flags": flags})
+
+        return biases
+
     def _facet(self, obs, param, labels, n):
         rows, ms, ses = [], [], []
         for p in range(n):
@@ -441,11 +805,42 @@ class MFRMEngine:
         if self.n_i > 1:
             rows, sep, rel = self._facet(self.obs_i, self.beta, self.i_labels[:self.n_i], self.n_i)
             r["facets"]["items"] = {"rows": rows, "separation": round(sep, 2), "reliability": round(rel, 3)}
+        # v0.9.0: 新诊断功能 (参考 Facets 专业报告)
+        r["bias"] = self._diagnose_bias()
+        r["categories"] = self._diagnose_categories()
+        r["anomalous"] = self._anomalous_responses()
+        r["rank_compare"] = self._rank_compare()
         return r
+
+    def _rank_compare(self) -> list[dict]:
+        """v0.9.0: 原始排名 vs MFRM 校正排名对比 (参考 PPT Slide 25)。"""
+        if not hasattr(self, 'exp_scores'):
+            return []
+        rows = []
+        for s in range(self.n_s):
+            idx = self.obs_s[s]
+            if len(idx) == 0:
+                continue
+            raw_total = int(self.scores[idx].sum())
+            fair_avg = round(float(self.exp_scores[idx].mean()), 2)
+            rows.append({
+                "label": self.s_labels[s] if s < len(self.s_labels) else f"S{s+1}",
+                "raw_total": raw_total,
+                "fair_avg": fair_avg,
+                "meas": round(float(self.theta[s]), 3),
+            })
+        rows.sort(key=lambda x: x["raw_total"], reverse=True)
+        for i, r in enumerate(rows):
+            r["raw_rank"] = i + 1
+        rows.sort(key=lambda x: x["fair_avg"], reverse=True)
+        for i, r in enumerate(rows):
+            r["fair_rank"] = i + 1
+            r["rank_diff"] = r["raw_rank"] - r["fair_rank"]
+        return rows
 
     def print(self):
         r = self.report(); s = r["summary"]
-        print(f"\n{'='*72}\nMFRMSight — 多面Rasch模型分析报告\n{'='*72}")
+        print(f"\n{'='*72}\nMFRMSight v0.9.0 — 多面Rasch模型分析报告\n{'='*72}")
         print(f"{s['N']}条 | {s['n_s']}学生×{s['n_r']}评分者×{s['n_c']}标准×{s['n_i']}题目 | {s['score_range']}分")
         print(f"方差解释: {s['var_exp']}% | LL: {s['ll']:.0f}")
         print(f"ObsMean={s['obs_mean']:.3f} ExpMean={s['exp_mean']:.3f} ResidSD={s['resid_sd']:.4f} StResSD={s['stres_sd']:.4f}")
@@ -456,6 +851,55 @@ class MFRMEngine:
             print("-" * 72)
             for row in fd["rows"]:
                 print(f"{row['label']:<16} {row['total']:>7.0f} {row['obs_avg']:>7.2f} {row['fair_avg']:>7.2f} {row['meas']:>7.3f} {row['se']:>6.3f} {row['infit']:>6.3f} {row['outfit']:>6.3f}")
+
+        # v0.9.0: 评分者偏差诊断
+        if r.get("bias"):
+            print(f"\n{'='*72}\n[!] 评分者偏差诊断\n{'='*72}")
+            for b in r["bias"]:
+                for tag, detail in b["flags"]:
+                    print(f"  [{tag}] {b['rater']}: {detail}")
+            if not any(b["flags"] for b in r["bias"]):
+                print("  [OK] 未检出显著评分者偏差")
+        else:
+            print(f"\n{'='*72}\n[OK] 评分者偏差诊断: 未检出异常\n{'='*72}")
+
+        # v0.9.0: 排名对比
+        if r.get("rank_compare"):
+            print(f"\n{'='*72}\n[>>>] 原始总分 vs MFRM校正 排名对比\n{'='*72}")
+            print(f"{'考生':<16} {'原始总分':>8} {'原始排名':>8} {'校正分':>8} {'校正排名':>8} {'排名变化':>8}")
+            print("-" * 60)
+            for row in r["rank_compare"]:
+                diff = row["rank_diff"]
+                arrow = "^" if diff > 0 else ("v" if diff < 0 else "-")
+                print(f"{row['label']:<16} {row['raw_total']:>8} {row['raw_rank']:>8} {row['fair_avg']:>8.2f} {row['fair_rank']:>8} {arrow}{abs(diff):>7}")
+
+        # v0.9.0: 等级类别功能诊断
+        cat = r.get("categories")
+        if cat:
+            print(f"\n{'='*72}\n[*] 评分等级类别功能诊断 (参考 Facets Table 8)\n{'='*72}")
+            print(f"等级数: {self.K+1} 档 ({self.min_s}-{self.max_s}), 阈值有序: {'是' if cat['tau_ordered'] else '否'}")
+            if cat["issues"]:
+                for issue in cat["issues"]:
+                    print(f"  [!] {issue}")
+            if cat["merge_suggestion"]:
+                print(f"  [>>] {cat['merge_suggestion']}")
+            if not cat["issues"]:
+                print("  [OK] 等级功能正常，无需合并")
+
+        # v0.9.0: 异常反应
+        anom = r.get("anomalous", [])
+        if anom:
+            print(f"\n{'='*72}\n[!!] 异常反应记录 (|StRes| >= 3)\n{'='*72}")
+            print(f"{'考生':<12} {'评分者':<10} {'标准':<8} {'观测分':>6} {'期望分':>6} {'残差':>6} {'StRes':>6}")
+            print("-" * 60)
+            for a in anom[:15]:  # 最多显示 15 条
+                print(f"{a['student']:<12} {a['rater']:<10} {a['criterion']:<8} "
+                      f"{a['observed']:>6} {a['expected']:>6.1f} {a['residual']:>6.1f} {a['stres']:>6.2f}")
+            if len(anom) > 15:
+                print(f"  ... 共 {len(anom)} 条异常反应")
+            print(f"\n  注意: 异常残差不直接等同于评分者偏见，应结合评分者、标准、原始评分记录综合判断")
+        else:
+            print(f"\n{'='*72}\n[OK] 异常反应检测: 未检出 |StRes| >= 3 的反应\n{'='*72}")
 
     def to_excel(self, path):
         import pandas as pd
