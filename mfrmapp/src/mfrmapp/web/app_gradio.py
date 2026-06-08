@@ -60,7 +60,7 @@ def analyze(file):
     # 各面向的 DataFrames
     dfs = {}
     seps = {}
-    for key, emoji in [("students", "🎓"), ("raters", "👤"), ("criteria", "📋"), ("items", "📝")]:
+    for key, emoji in [("students", "🎓"), ("raters", ""), ("criteria", "📋"), ("items", "📝")]:
         fd = r["facets"].get(key)
         if fd and fd["rows"]:
             df = pd.DataFrame(fd["rows"])
@@ -101,7 +101,13 @@ def build_interface():
             with gr.Column(scale=1):
                 table1 = gr.DataFrame(label="🎓 学生")
             with gr.Column(scale=1):
-                table2 = gr.DataFrame(label="👤 评分者")
+                rater_icon = gr.Image(
+                    value="https://raw.githubusercontent.com/ZGY6/mfrmapp/master/mfrmapp/src/mfrmapp/web/static/rater_icon.jpg",
+                    label="评分者", show_label=True, width=48, height=48,
+                    interactive=False, show_download_button=False,
+                    show_fullscreen_button=False, container=False,
+                )
+                table2 = gr.DataFrame(label="评分者数据")
 
         with gr.Row():
             with gr.Column(scale=1):

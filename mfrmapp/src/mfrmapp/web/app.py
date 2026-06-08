@@ -99,13 +99,15 @@ if uploaded:
         # 各面向
         for key, emoji, title, cols_d in [
             ("students", "🎓", "学生面向", ["名称", "总分", "ObsAvg", "FairAvg", "Meas", "SE", "Infit", "Outfit"]),
-            ("raters", "👤", "评分者面向", ["名称", "总分", "ObsAvg", "Meas", "SE", "Infit", "Outfit"]),
+            ("raters", "🧑‍⚖️", "评分者面向", ["名称", "总分", "ObsAvg", "Meas", "SE", "Infit", "Outfit"]),
             ("criteria", "📋", "标准面向", ["名称", "总分", "ObsAvg", "Meas", "SE", "Infit", "Outfit"]),
             ("items", "📝", "题目面向", ["名称", "总分", "ObsAvg", "Meas", "SE", "Infit", "Outfit"]),
         ]:
             fd = r["facets"].get(key)
             if not fd or not fd["rows"]:
                 continue
+            if key == "raters":
+                st.image("mfrmapp/src/mfrmapp/web/static/rater_icon.jpg", width=40)
             st.markdown(f'<div class="ftitle">{emoji} {title} — Sep={fd["separation"]:.2f} | Rel={fd["reliability"]:.3f}</div>',
                         unsafe_allow_html=True)
             df = pd.DataFrame(fd["rows"])
