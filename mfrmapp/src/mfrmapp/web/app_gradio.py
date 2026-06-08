@@ -23,7 +23,15 @@ def analyze(file):
 
     suffix = Path(file.name).suffix
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as f:
-        f.write(file if isinstance(file, bytes) else open(file.name, "rb").read())
+        # 兼容 Gradio 传 bytes 和传文件路径两种情况
+        if isinstance(file, bytes):
+            f.write(file)
+        else:
+            # Gradio 可能传 file-like 对象，优先用 .read()，失败则用路径
+            try:
+                f.write(file.read())
+            except Exception:
+                f.write(open(file.name, "rb").read())
         tmp = f.name
     try:
         if suffix == ".txt":
