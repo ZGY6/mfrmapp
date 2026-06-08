@@ -39,3 +39,8 @@ mfrmapp-gradio = "mfrmapp.web.app_gradio:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/mfrmapp"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+]

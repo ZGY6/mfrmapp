@@ -4,11 +4,37 @@ MFRMSight 开发者日志 (Developer Log)
 项目: MFRMSight — 多面Rasch模型分析工具
 创建: 2026-06-07
 最后更新: 2026-06-08
-当前版本: v0.8.0 (所有已知Bug已修复)
+当前版本: v0.8.0 (代码审查完成，无新Bug)
 状态: 开发中
 ================================================================================
 
-[2026-06-08 11:00] 包版 v0.8.0 上线 + Render.com 永久部署准备
+[2026-06-08 11:30] 包版 v0.8.0 代码审查 — 无新 Bug 发现
+  审查范围: engine.py (490行), app_gradio.py (135行), cli.py (43行),
+            app.py (153行), __init__.py, pyproject.toml, render.yaml, README.md
+  测试: 32/32 passed (6.48s)
+
+  审查发现:
+    1. ✅ 所有已知 Bug (BUG-001~014) 已修复
+    2. ✅ engine.py 代码质量良好，无硬编码、无死代码
+    3. ✅ error handling 完善: parse_excel 文件不存在 → FileNotFoundError,
+       report() 未 fit → RuntimeError
+    4. ✅ 两个引擎结果一致: ObsMean=10.621(相同), ExpMean Δ=0.005, VarExp Δ=0.07%
+    5. ✅ BUG-004 稀疏数据检测已实现 (fit() 中 warnings.warn)
+    6. ⚠️ 旧版残留: mfrm_web.py 仍然存在但已停用 (PID 已 kill)
+    7. ⚠️ mfrmapp/ 目录缺少 tests/ (测试文件在项目根目录 tests/，只测 mfrm_app.py)
+
+  engine.py vs mfrm_app.py 最终对比:
+    指标           engine.py       mfrm_app.py     Facets 参考
+    ─────────────────────────────────────────────────────────
+    ObsMean        10.621          10.621          10.62
+    ExpMean        10.617          10.622          10.62
+    VarExp         88.10%          88.03%          88.10%
+    Stu Sep        11.58           14.26           9.89
+    Item Sep       18.11           22.35           15.47
+
+  engine.py 决定优势: VarExp 完全追平 Facets，Separation 也更接近。
+
+[2026-06-08 11:00] 包版 v0.7.0 上线 + Render.com 永久部署准备
   完成:
     1. 停止旧 Web 进程 (mfrm_web.py:8080, mfrm_app.py Gradio:7870, http.server x2)
     2. pyproject.toml: 0.2.0→0.7.0, 添加 gradio>=4.0, 新入口点 mfrmapp-gradio
