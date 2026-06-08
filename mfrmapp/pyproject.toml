@@ -27,6 +27,9 @@ dependencies = [
     "scipy>=1.10",
     "openpyxl>=3.0",
     "gradio>=4.0",
+    "matplotlib>=3.10.9",
+    "pillow>=12.2.0",
+    "python-docx>=1.2.0",
 ]
 [project.optional-dependencies]
 word = ["python-docx>=1.0"]

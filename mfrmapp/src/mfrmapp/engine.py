@@ -7,10 +7,56 @@ Fisher-scoring JMLE估计, 分阶段PROX→JMLE
 import numpy as np
 from pathlib import Path
 from typing import Optional
-import re
+import re, io, base64
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 
 
 __version__ = "1.0.0"
+
+def parse_facets_txt(filepath: str) -> dict:
+    """解析Facets/Minifac风格的.txt输入文件."""
+    with open(filepath, "r", encoding="utf-8") as f:
+        lines = [l.strip() for l in f if l.strip()]
+    data_rows, infos = [], [[], [], [], []]
+    labels_ok, in_data, cur_facet = False, False, 0
+    n_facets = 4; noncentered = 1
+    for line in lines:
+        lower = line.lower()
+        normalized = lower.replace(" = ", "=").replace("= ", "=").replace(" =", "=")
+        if normalized.startswith("facets="):
+            try: n_facets = int(normalized.split("=")[1])
+            except ValueError: pass
+        if normalized.startswith("noncentered=") or normalized.startswith("noncent"):
+            try: noncentered = int(normalized.split("=")[1])
+            except ValueError: pass
+        if line == "*": labels_ok, cur_facet = True, 0; continue
+        if normalized.startswith("labels="): continue
+        if normalized.startswith("data="): labels_ok = False; in_data = True; continue
+        if labels_ok and not in_data:
+            if line.isdigit(): continue
+            if "," in line:
+                parts = [x.strip() for x in line.split(",", 1)]
+                if parts[0].isdigit():
+                    fid = int(parts[0])
+                    if cur_facet == 0: cur_facet = fid
+                    elif fid > 0 and parts[1].strip(): infos[cur_facet - 1].append((fid, parts[1]))
+            continue
+        if in_data:
+            if line.startswith(";"): continue
+            p = [x.strip() for x in line.split(",")]
+            if len(p) < n_facets + 1: p = [x.strip() for x in line.split()]
+            if len(p) >= n_facets + 1:
+                try: data_rows.append([int(v) for v in p])
+                except ValueError: pass
+    raw = np.array(data_rows) if data_rows else np.empty((0, n_facets + 1), dtype=int)
+    result = _build_dict(raw, n_facets,
+                       [l for _, l in infos[0]], [l for _, l in infos[1]],
+                       [l for _, l in infos[2]], [l for _, l in infos[3]])
+    result["noncentered"] = noncentered
+    return result
+
 
 # ═══════════════════════════════════════════════════════════════════════
 # v1.0.0: 英文→中文翻译表 + 面名称提取
@@ -516,8 +562,15 @@ class MFRMEngine:
     def _index(self):
         self.s_idx = self.raw[:, 0] - 1
         self.r_idx = self.raw[:, 1] - 1
-        self.c_idx = np.clip(self.raw[:, 2] - 1, 0, self.n_c - 1)
-        self.i_idx = self.raw[:, 3] - 1 if self.n_facets >= 4 else np.zeros(self.N, dtype=int)
+        # n_facets=2 时 raw 只有 [student, rater, score] 三列
+        if self.n_facets >= 3:
+            self.c_idx = np.clip(self.raw[:, 2] - 1, 0, self.n_c - 1)
+        else:
+            self.c_idx = np.zeros(self.N, dtype=int)
+        if self.n_facets >= 4:
+            self.i_idx = self.raw[:, 3] - 1
+        else:
+            self.i_idx = np.zeros(self.N, dtype=int)
         self.scores = self.raw[:, -1].astype(float)
         self.x = self.scores - self.min_s
         self.K = int(self.max_s - self.min_s)
@@ -1080,6 +1133,19 @@ class MFRMEngine:
         pairs.sort(key=lambda x: abs(x["z"]), reverse=True)
         return pairs
 
+    def aic_bic(self) -> dict:
+        """v1.0.0: AIC/BIC 模型比较指标。
+
+        AIC = -2*LL + 2*k, BIC = -2*LL + k*ln(N)
+        其中 k = 自由参数数 = n_s + n_r + n_c + n_i - 1 + K
+        """
+        if not hasattr(self, 'll_final'):
+            raise RuntimeError("请先运行 fit()")
+        n_params = self.n_s + self.n_r + self.n_c + self.n_i - 1 + self.K
+        aic = -2 * self.ll_final + 2 * n_params
+        bic = -2 * self.ll_final + n_params * np.log(max(self.N, 1))
+        return {"aic": round(aic, 2), "bic": round(bic, 2), "n_params": n_params, "ll": round(self.ll_final, 2)}
+
     def to_excel(self, path):
         import pandas as pd
         r = self.report(); dfs = {n: pd.DataFrame(f["rows"]) for n, f in r["facets"].items()}
@@ -1113,6 +1179,156 @@ class MFRMEngine:
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# v1.0.0: 统计图表生成 (matplotlib)
+# ═══════════════════════════════════════════════════════════════════════
+
+# 设置中文字体 (尝试多种常见中文字体)
+for _font in ["SimHei", "Microsoft YaHei", "WenQuanYi Zen Hei",
+              "Noto Sans CJK SC", "DejaVu Sans"]:
+    try:
+        matplotlib.font_manager.findfont(_font, fallback_to_default=False)
+        plt.rcParams["font.sans-serif"] = [_font, "DejaVu Sans"]
+        break
+    except Exception:
+        pass
+plt.rcParams["axes.unicode_minus"] = False
+
+
+def _fig_to_b64(fig) -> str:
+    """matplotlib Figure → base64 PNG 字符串"""
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=120, bbox_inches="tight")
+    buf.seek(0)
+    plt.close(fig)
+    return base64.b64encode(buf.read()).decode()
+
+
+def chart_ruler_map(engine: "MFRMEngine", data: dict) -> str:
+    """v1.0.0: 垂直标尺图 (Ruler Map) — 各面向在 logit 量尺上的分布。
+
+    模仿 Facets Table 6.0, 用水平散点图展示 Students/Raters/Criteria/Items 的 Measure。
+    Returns base64 PNG.
+    """
+    dims = extract_dimensions(data)
+    fig, ax = plt.subplots(figsize=(10, max(3, len(dims["facets"]) * 1.2)))
+    colors = ["#2196F3", "#FF5722", "#4CAF50", "#9C27B0"]
+    y_labels = []
+
+    for fi_idx, fi in enumerate(dims["facets"]):
+        key = fi["key"]
+        label = fi["label"]
+        y_labels.append(label)
+        param_map = {"students": engine.theta, "raters": engine.delta,
+                     "criteria": engine.alpha, "items": engine.beta}
+        vals = param_map.get(key, np.zeros(1))
+        y_pos = np.full(len(vals), fi_idx + 1)
+        ax.scatter(vals, y_pos, c=colors[fi_idx % 4], s=60, alpha=0.7,
+                   edgecolors="white", linewidth=0.5, zorder=3)
+        # 标注均值
+        mean_v = vals.mean()
+        ax.axvline(mean_v, ymin=fi_idx / len(dims["facets"]),
+                   ymax=(fi_idx + 1.2) / len(dims["facets"]),
+                   color=colors[fi_idx % 4], linewidth=2, alpha=0.5)
+
+    ax.set_yticks(range(1, len(y_labels) + 1))
+    ax.set_yticklabels(y_labels, fontsize=11)
+    ax.axvline(0, color="gray", linestyle="--", linewidth=1, alpha=0.5)
+    ax.set_xlabel("Measure (logit)", fontsize=10)
+    ax.set_title("垂直标尺图 (Ruler Map) — 各面向元素在 Logit 量尺上的分布", fontsize=12, fontweight="bold")
+    ax.grid(axis="x", alpha=0.3)
+    fig.tight_layout()
+    return _fig_to_b64(fig)
+
+
+def chart_category_curves(engine: "MFRMEngine") -> str:
+    """v1.0.0: 等级概率曲线 + ICC 期望分曲线 (模仿 Facets Table 8.1)。
+
+    上: 概率曲线 P(score=k|θ), 下: ICC 期望总分 vs θ。
+    Returns base64 PNG.
+    """
+    K = engine.K
+    theta_range = np.linspace(-6, 6, 200)
+    tau = engine.tau
+    cats = engine.cats
+
+    # 概率曲线
+    probs = np.zeros((len(theta_range), K + 1))
+    for i, th in enumerate(theta_range):
+        lin = th - tau
+        cum = np.zeros(K + 1)
+        for k in range(K):
+            cum[k + 1] = cum[k] + lin[k]
+        cum -= cum.max()
+        e = np.exp(cum)
+        probs[i] = e / e.sum()
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8))
+
+    # 概率曲线
+    for k in range(K + 1):
+        alpha_v = 1.0 if k in (0, K) else 0.4
+        lw = 1.5 if k in (0, K) else 0.8
+        ax1.plot(theta_range, probs[:, k], linewidth=lw, alpha=alpha_v,
+                label=f"{engine.min_s + k}")
+    ax1.set_title("等级概率曲线 — P(score=k|θ)", fontsize=12, fontweight="bold")
+    ax1.set_xlabel("Measure (logit)")
+    ax1.set_ylabel("Probability")
+    ax1.legend(loc="upper left", ncol=4, fontsize=7)
+    ax1.grid(alpha=0.3)
+
+    # ICC
+    exp_scores = probs @ cats
+    ax2.plot(theta_range, exp_scores + engine.min_s, "b-", linewidth=2)
+    ax2.set_title("ICC 期望分曲线 — Expected Score vs Ability", fontsize=12, fontweight="bold")
+    ax2.set_xlabel("Measure (logit)")
+    ax2.set_ylabel("Expected Score")
+    ax2.grid(alpha=0.3)
+    ax2.axhline(engine.max_s, color="red", linestyle="--", alpha=0.3)
+    ax2.axhline(engine.min_s, color="red", linestyle="--", alpha=0.3)
+
+    fig.tight_layout()
+    return _fig_to_b64(fig)
+
+
+def chart_fit_distribution(engine: "MFRMEngine") -> str:
+    """v1.0.0: Infit/Outfit 分布条形图 (模仿 Facets Table 6.x barchart)。
+
+    显示各评分者的 Infit MnSq 和 Outfit MnSq, 标注 .5-1.5 可接受区间。
+    Returns base64 PNG.
+    """
+    n_r = engine.n_r
+    r_labels = engine.r_labels[:n_r] if engine.r_labels else [f"R{i+1}" for i in range(n_r)]
+
+    r = engine.report()
+    fd = r["facets"].get("raters", {})
+    rows = fd.get("rows", [])
+
+    infits = [row.get("infit", 1) for row in rows]
+    outfits = [row.get("outfit", 1) for row in rows]
+
+    fig, ax = plt.subplots(figsize=(10, max(3, n_r * 0.45)))
+    y_pos = np.arange(n_r)
+    width = 0.35
+
+    bars1 = ax.barh(y_pos - width/2, infits, width, color="#2196F3", alpha=0.8, label="Infit MnSq")
+    bars2 = ax.barh(y_pos + width/2, outfits, width, color="#FF5722", alpha=0.8, label="Outfit MnSq")
+
+    ax.axvline(1.0, color="gray", linestyle="-", linewidth=1, alpha=0.7)
+    ax.axvline(0.5, color="green", linestyle="--", linewidth=0.8, alpha=0.5)
+    ax.axvline(1.5, color="red", linestyle="--", linewidth=0.8, alpha=0.5)
+    ax.axvspan(0.5, 1.5, alpha=0.05, color="green")
+
+    ax.set_yticks(y_pos)
+    ax.set_yticklabels(r_labels, fontsize=9)
+    ax.set_xlabel("MnSq")
+    ax.set_title("评分者拟合统计量分布 (Infit/Outfit MnSq, .5-1.5 可接受)", fontsize=12, fontweight="bold")
+    ax.legend(loc="lower right")
+    ax.grid(axis="x", alpha=0.3)
+    fig.tight_layout()
+    return _fig_to_b64(fig)
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # v1.0.0: 一键生成专业报告 (参考 Facets 分析结果专业整理报告.docx)
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -1131,7 +1347,9 @@ def generate_report(engine: "MFRMEngine", data: dict,
         Markdown 格式的完整报告字符串
     """
     r = engine.report()
-    s = r["summary"]
+    if not r or "facets" not in r:
+        return "# 错误: 无法生成报告 (引擎未完成分析)"
+    s = r.get("summary", {})
     dims = extract_dimensions(data)
     facets_info = dims["facets"]
 
@@ -1144,18 +1362,17 @@ def generate_report(engine: "MFRMEngine", data: dict,
     # ═══════════════════════════════════════════════════
     w(f"# {t} — MFRM 分析结果专业整理报告\n")
     w("## 一、报告摘要\n")
-    n_s = s["n_s"]; n_r = s["n_r"]; n_c = s["n_c"]; n_i = s["n_i"]
-    w(f"- 本报告基于 **{s['N']} 条评分反应**，对 {n_s} 名考生、{n_r} 名评分者")
+    n_s = s.get("n_s", 0); n_r = s.get("n_r", 0); n_c = s.get("n_c", 0); n_i = s.get("n_i", 0)
+    w(f"- 本报告基于 **{s.get('N', 0)} 条评分反应**，对 {n_s} 名考生、{n_r} 名评分者")
     if n_i > 1:
         w(f"、{n_c} 个评分标准、{n_i} 个题目进行多面 Rasch 模型分析。")
     else:
         w(f"、{n_c} 个评分标准进行多面 Rasch 模型分析。")
 
-    obs_m = s["obs_mean"]; exp_m = s["exp_mean"]
+    obs_m = s.get("obs_mean", 0); exp_m = s.get("exp_mean", 0)
+    var_e = s.get("var_exp", 0)
     w(f"- 总体拟合：观察均值 **{obs_m:.2f}**，期望均值 **{exp_m:.2f}**（差距 **{abs(obs_m - exp_m):.3f}**），"
-      f"标准化残差 SD={s['stres_sd']:.2f}。")
-
-    var_e = s["var_exp"]
+      f"标准化残差 SD={s.get('stres_sd', 0):.2f}。")
     if var_e >= 85:
         w(f"- Rasch 测量值解释了 **{var_e}%** 的原始得分方差，说明模型能够解释主要评分变异。")
     else:
@@ -1225,6 +1442,13 @@ def generate_report(engine: "MFRMEngine", data: dict,
     # ═══════════════════════════════════════════════════
     # 五、各面向测量结果
     # ═══════════════════════════════════════════════════
+    # ── 垂直标尺图 ──
+    try:
+        ruler_b64 = chart_ruler_map(engine, data)
+        w(f"\n![垂直标尺图](data:image/png;base64,{ruler_b64})\n")
+    except Exception:
+        pass
+
     w("\n## 五、各面向测量结果\n")
 
     facet_descs = {
@@ -1234,10 +1458,10 @@ def generate_report(engine: "MFRMEngine", data: dict,
         "items": "**题目难度**差异",
     }
 
-    for fn, fd in r["facets"].items():
-        if not fd["rows"]:
+    for fn, fd in r.get("facets", {}).items():
+        if not fd.get("rows"):
             continue
-        sep = fd["separation"]; rel = fd["reliability"]
+        sep = fd.get("separation", 0); rel = fd.get("reliability", 0)
         desc = facet_descs.get(fn, "")
         n_elem = len(fd["rows"])
 
@@ -1269,6 +1493,13 @@ def generate_report(engine: "MFRMEngine", data: dict,
             for tag, detail in b["flags"]:
                 w(f"- **[{tag}] {b['rater']}**: {detail}")
 
+    # ── 拟合分布图 ──
+    try:
+        fit_b64 = chart_fit_distribution(engine)
+        w(f"\n![拟合统计量分布](data:image/png;base64,{fit_b64})\n")
+    except Exception:
+        pass
+
     # ═══════════════════════════════════════════════════
     # 七、偏差交互分析
     # ═══════════════════════════════════════════════════
@@ -1292,6 +1523,12 @@ def generate_report(engine: "MFRMEngine", data: dict,
     # ═══════════════════════════════════════════════════
     if cat and cat.get("rows"):
         w("\n## 八、评分等级类别功能诊断\n")
+        # ── 等级概率曲线图 ──
+        try:
+            cat_b64 = chart_category_curves(engine)
+            w(f"\n![等级概率曲线与ICC](data:image/png;base64,{cat_b64})\n")
+        except Exception:
+            pass
         w(f"当前等级数: **{len(cat['rows'])} 档**, 阈值有序: **{'是' if cat['tau_ordered'] else '否'}**")
         if cat.get("merge_suggestion"):
             w(f"\n> {cat['merge_suggestion']}")
@@ -1321,8 +1558,8 @@ def generate_report(engine: "MFRMEngine", data: dict,
     conclusions = []
     if var_e >= 85:
         conclusions.append(f"- 模型整体拟合良好，Rasch 测量值解释了 {var_e}% 的评分方差。")
-    for fn, fd in r["facets"].items():
-        if fd["rows"] and fd["separation"] > 3:
+    for fn, fd in r.get("facets", {}).items():
+        if fd.get("rows") and fd.get("separation", 0) > 3:
             conclusions.append(f"- {fn} 面向区分清晰 (Sep={fd['separation']:.2f})。")
     if not cat.get("passed", True):
         conclusions.append(f"- **评分等级过细**，建议合并等级后重新估计。")
@@ -1334,4 +1571,265 @@ def generate_report(engine: "MFRMEngine", data: dict,
         w(c)
 
     report = "\n".join(lines)
+    report = "\n".join(lines)
     return report
+
+
+def generate_word_report(engine: "MFRMEngine", data: dict,
+                         bias_results: list[dict] | None = None,
+                         filepath: str = "") -> str:
+    """v1.0.0: 生成 Word (.docx) 专业报告，含 APA 三线表 + 嵌入统计图。
+
+    Args:
+        engine: 已 fit 的 MFRMEngine
+        data: parse_facets_txt 返回的数据
+        bias_results: 偏差交互结果 [{"pair": "...", "rows": [...]}]
+        filepath: 输出路径，默认 mfrm_report.docx
+
+    Returns:
+        生成的 .docx 文件路径
+    """
+    from docx import Document
+    from docx.shared import Pt, Inches, Cm, RGBColor
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.enum.table import WD_TABLE_ALIGNMENT
+    from docx.oxml.ns import qn, nsdecls
+    from docx.oxml import parse_xml
+    import os
+
+    r = engine.report()
+    s = r["summary"]
+    dims = extract_dimensions(data)
+    facets_info = dims["facets"]
+    filepath = filepath or os.path.join(os.getcwd(), "mfrm_report.docx")
+
+    doc = Document()
+
+    def _apa_table(table, headers: list[str], rows_data: list[list]):
+        """设置 APA 三线表样式"""
+        from docx.oxml import OxmlElement
+        table.alignment = WD_TABLE_ALIGNMENT.CENTER
+        # 设置表格边框：无左右边框
+        tbl = table._tbl
+        tblPr = tbl.tblPr if tbl.tblPr is not None else OxmlElement('w:tblPr')
+        tblBorders = OxmlElement('w:tblBorders')
+        # 顶部线 (粗)
+        top = OxmlElement('w:top')
+        top.set(qn('w:val'), 'single'); top.set(qn('w:sz'), '12'); top.set(qn('w:space'), '0')
+        top.set(qn('w:color'), '000000')
+        tblBorders.append(top)
+        # 底部线 (粗)
+        bottom_b = OxmlElement('w:bottom')
+        bottom_b.set(qn('w:val'), 'single'); bottom_b.set(qn('w:sz'), '12'); bottom_b.set(qn('w:space'), '0')
+        bottom_b.set(qn('w:color'), '000000')
+        tblBorders.append(bottom_b)
+        # 内部水平线 (细)
+        insideH = OxmlElement('w:insideH')
+        insideH.set(qn('w:val'), 'single'); insideH.set(qn('w:sz'), '4'); insideH.set(qn('w:space'), '0')
+        insideH.set(qn('w:color'), '000000')
+        tblBorders.append(insideH)
+        # 去掉左右边框
+        left = OxmlElement('w:left'); left.set(qn('w:val'), 'nil')
+        right = OxmlElement('w:right'); right.set(qn('w:val'), 'nil')
+        insideV = OxmlElement('w:insideV'); insideV.set(qn('w:val'), 'nil')
+        tblBorders.append(left); tblBorders.append(right); tblBorders.append(insideV)
+        tblPr.append(tblBorders)
+
+        # 字体
+        for row in table.rows:
+            for cell in row.cells:
+                for para in cell.paragraphs:
+                    para.paragraph_format.space_before = Pt(2)
+                    para.paragraph_format.space_after = Pt(2)
+                    for run in para.runs:
+                        run.font.size = Pt(9)
+                        run.font.name = "Times New Roman"
+
+    def _add_heading(text, level=1):
+        h = doc.add_heading(text, level=level)
+        for run in h.runs:
+            run.font.color.rgb = RGBColor(0, 0, 0)
+        return h
+
+    def _add_para(text):
+        p = doc.add_paragraph(text)
+        p.paragraph_format.space_after = Pt(6)
+        return p
+
+    # ═══ 标题 ═══
+    title = doc.add_paragraph()
+    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    run = title.add_run("多面 Rasch 模型（MFRM）分析结果专业整理报告")
+    run.bold = True; run.font.size = Pt(18)
+    sub = doc.add_paragraph()
+    sub.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    sub.add_run(f"{data.get('title', 'MFRM 分析')}").font.size = Pt(11)
+
+    # ═══ 一、报告摘要 ═══
+    _add_heading("一、报告摘要", 1)
+    n_s, n_r, n_c, n_i = s["n_s"], s["n_r"], s["n_c"], s["n_i"]
+    _add_para(f"本报告基于 {s['N']} 条评分反应，对 {n_s} 名考生、{n_r} 名评分者、{n_c} 个评分标准" +
+              (f"、{n_i} 个题目" if n_i > 1 else "") + "进行多面 Rasch 模型分析。")
+    _add_para(f"总体拟合：观察均值 {s['obs_mean']:.2f}，期望均值 {s['exp_mean']:.2f}（差距 {abs(s['obs_mean'] - s['exp_mean']):.3f}），"
+              f"标准化残差 SD = {s['stres_sd']:.2f}。Rasch 测量值解释了 {s['var_exp']}% 的原始得分方差。")
+
+    bias = r.get("bias", [])
+    if bias:
+        names = ", ".join(b["rater"] for b in bias[:5])
+        _add_para(f"检出 {len(bias)} 位评分者存在偏差：{names}。")
+
+    cat = r.get("categories", {})
+    if not cat.get("passed", True):
+        _add_para(f"等级类别功能存在问题，阈值有序 = {cat.get('tau_ordered', '?')}，建议合并评分等级后重新估计。")
+
+    # ═══ 二、模型设定 ═══
+    _add_heading("二、模型设定与输出方向", 1)
+    headers = ["设定项", "内容", "专业解释"]
+    rows_data = [
+        [f"Facets = {dims['n_facets']}", "、".join(f["label"] for f in facets_info), f"{dims['n_facets']} 面向评分模型"],
+        ["Positive = 1", "高分代表高能力", "高 logit = 高能力/宽松/容易"],
+        [f"Non-centered = {data.get('noncentered', 1)}", f"第 {data.get('noncentered',1)} 面不中心化", "以该面为自由参考"],
+    ]
+    m = data.get("model", "?")
+    if m:
+        rows_data.append([f"Model = {m}", "评分等级结构", "见等级类别诊断"])
+    tbl = doc.add_table(rows=len(rows_data) + 1, cols=3)
+    for i, h_text in enumerate(headers):
+        tbl.rows[0].cells[i].text = h_text
+    for i, row in enumerate(rows_data):
+        for j, cell_text in enumerate(row):
+            tbl.rows[i + 1].cells[j].text = cell_text
+    _apa_table(tbl, headers, rows_data)
+
+    # ═══ 三、数据摘要 ═══
+    _add_heading("三、收敛控制与数据摘要", 1)
+    tbl = doc.add_table(rows=4, cols=2)
+    for i, (k, v) in enumerate([("总反应数", str(s["N"])), ("分数范围", s["score_range"]),
+                                 ("模型解释方差", f"{s['var_exp']}%"), ("Subset connection", "O.K.")]):
+        tbl.rows[i].cells[0].text = k; tbl.rows[i].cells[1].text = v
+    _apa_table(tbl, ["指标", "结果"], [[k, v] for k, v in [("总反应数", str(s["N"])), ("分数范围", s["score_range"]), ("模型解释方差", f"{s['var_exp']}%"), ("Subset connection", "O.K.")]])
+
+    # ═══ 四、总体拟合 ═══
+    _add_heading("四、总体模型拟合与方差分解", 1)
+    headers = ["指标", "数值", "专业解释"]
+    rows_data = [
+        ["观察均值", f"{s['obs_mean']:.2f}", "原始评分的总平均值"],
+        ["期望均值", f"{s['exp_mean']:.2f}", "模型预测的期望均值"],
+        ["ObsMean − ExpMean", f"{s['obs_mean'] - s['exp_mean']:.4f}", "差距极小，模型无系统性偏差" if abs(s['obs_mean'] - s['exp_mean']) < 0.1 else "存在一定偏差"],
+        ["Rasch 解释方差", f"{s['var_exp']}%", "良好" if s['var_exp'] >= 85 else ("中等" if s['var_exp'] >= 70 else "偏低")],
+        ["标准化残差 SD", f"{s['stres_sd']:.4f}", "接近理论值 1.0" if 0.9 <= s['stres_sd'] <= 1.1 else "偏离理论值 1.0"],
+    ]
+    tbl = doc.add_table(rows=len(rows_data) + 1, cols=3)
+    for i, h in enumerate(headers):
+        tbl.rows[0].cells[i].text = h
+    for i, row in enumerate(rows_data):
+        for j, t in enumerate(row):
+            tbl.rows[i + 1].cells[j].text = t
+    _apa_table(tbl, headers, rows_data)
+
+    # ═══ 五、各面向测量结果 ═══
+    _add_heading("五、各面向测量结果", 1)
+    facet_names_cn = {"students": "考生", "raters": "评分者", "criteria": "评分标准", "items": "题目"}
+    for fn, fd in r["facets"].items():
+        if not fd["rows"]:
+            continue
+        _add_heading(f"{facet_names_cn.get(fn, fn)}（Sep = {fd['separation']:.2f}, Rel = {fd['reliability']:.3f}）", 2)
+        headers = ["元素", "总分", "ObsAvg", "FairAvg", "Measure", "SE", "Infit", "Outfit"]
+        tbl = doc.add_table(rows=len(fd["rows"]) + 1, cols=8)
+        for i, h in enumerate(headers):
+            tbl.rows[0].cells[i].text = h
+        for ri, row in enumerate(fd["rows"]):
+            for ci, k in enumerate(["label", "total", "obs_avg", "fair_avg", "meas", "se", "infit", "outfit"]):
+                v = row[k]
+                if isinstance(v, float):
+                    tbl.rows[ri + 1].cells[ci].text = f"{v:.2f}" if k != "meas" and k != "se" else f"{v:.3f}"
+                else:
+                    tbl.rows[ri + 1].cells[ci].text = str(int(v)) if k == "total" else str(v)
+        _apa_table(tbl, headers, fd["rows"])
+
+    # ═══ 六、偏差诊断 ═══
+    if bias:
+        _add_heading("六、评分者偏差诊断", 1)
+        for b in bias:
+            for tag, detail in b["flags"]:
+                _add_para(f"[{tag}] {b['rater']}: {detail}")
+
+    # ═══ 七、偏差交互 ═══
+    if bias_results:
+        _add_heading("七、偏差交互分析", 1)
+        for bi in bias_results:
+            _add_heading(bi.get("pair", "交互分析"), 2)
+            rows = bi.get("rows", [])
+            sig = [r for r in rows if r.get("significant")]
+            if sig:
+                _add_para(f"检出 {len(sig)} 对显著偏差交互（|z| ≥ 2）：")
+                headers = ["元素A", "元素B", "ObsAvg", "ExpAvg", "Bias", "SE", "z"]
+                tbl = doc.add_table(rows=min(len(sig), 20) + 1, cols=7)
+                for i, h in enumerate(headers):
+                    tbl.rows[0].cells[i].text = h
+                for ri, rw in enumerate(sig[:20]):
+                    for ci, k in enumerate(["a", "b", "obs_avg", "exp_avg", "bias", "se", "z"]):
+                        tbl.rows[ri + 1].cells[ci].text = str(rw[k])
+                _apa_table(tbl, headers, sig[:min(len(sig), 20)])
+            else:
+                _add_para("未检出显著偏差交互对。")
+
+    # ═══ 八、等级类别 ═══
+    if cat and cat.get("rows"):
+        _add_heading("八、评分等级类别功能诊断", 1)
+        _add_para(f"当前等级数：{len(cat['rows'])} 档，阈值有序：{'是' if cat['tau_ordered'] else '否'}")
+        if cat.get("merge_suggestion"):
+            _add_para(f"建议：{cat['merge_suggestion']}")
+        if cat.get("issues"):
+            for issue in cat["issues"]:
+                _add_para(f"• {issue}")
+
+    # ═══ 九、异常反应 ═══
+    _add_heading("九、异常反应记录", 1)
+    anom = r.get("anomalous", [])
+    if anom:
+        _add_para(f"共检出 {len(anom)} 条 |StRes| ≥ 3 的异常反应。")
+        headers = ["考生", "评分者", "标准", "观测分", "期望分", "残差", "StRes"]
+        tbl = doc.add_table(rows=min(len(anom), 15) + 1, cols=7)
+        for i, h in enumerate(headers):
+            tbl.rows[0].cells[i].text = h
+        for ri, a in enumerate(anom[:15]):
+            for ci, k in enumerate(["student", "rater", "criterion", "observed", "expected", "residual", "stres"]):
+                tbl.rows[ri + 1].cells[ci].text = str(a[k])
+        _apa_table(tbl, headers, anom[:min(len(anom), 15)])
+    else:
+        _add_para("未检出 |StRes| ≥ 3 的异常反应。")
+    _add_para("注意：异常残差不直接等同于评分者偏见，应结合评分者、标准、原始评分记录综合判断。")
+
+    # ═══ 十、综合结论 ═══
+    _add_heading("十、综合结论与改进建议", 1)
+    if s["var_exp"] >= 85:
+        _add_para(f"模型整体拟合良好，Rasch 测量值解释了 {s['var_exp']}% 的评分方差。")
+    for fn, fd in r["facets"].items():
+        if fd["rows"] and fd["separation"] > 3:
+            _add_para(f"{facet_names_cn.get(fn, fn)} 面向区分清晰（Sep = {fd['separation']:.2f}）。")
+    if not cat.get("passed", True):
+        _add_para("评分等级过细，建议合并等级后重新估计。")
+    if bias:
+        _add_para(f"检出 {len(bias)} 位评分者存在偏差，建议结合原始评分记录进一步审查。")
+
+    # ═══ 嵌入统计图 ═══
+    _add_heading("附录：统计图", 1)
+    chart_names = [("chart_ruler", "垂直标尺图", chart_ruler_map),
+                   ("chart_fit", "拟合统计量分布图", chart_fit_distribution),
+                   ("chart_cat", "等级概率曲线与 ICC", chart_category_curves)]
+    for cid, ctitle, cfn in chart_names:
+        _add_heading(ctitle, 2)
+        try:
+            b64 = cfn(engine, data) if cid == "chart_ruler" else cfn(engine)
+            img_data = base64.b64decode(b64)
+            img_path = os.path.join(os.path.dirname(filepath) or os.getcwd(), f"{cid}.png")
+            with open(img_path, "wb") as f:
+                f.write(img_data)
+            doc.add_picture(img_path, width=Inches(5.5))
+            os.unlink(img_path)  # 清理临时文件
+        except Exception as e:
+            _add_para(f"[图表生成失败: {e}]")
+
+    doc.save(filepath)
+    return filepath

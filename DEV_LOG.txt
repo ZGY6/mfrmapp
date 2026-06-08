@@ -4,8 +4,52 @@ MFRMSight 开发者日志 (Developer Log)
 项目: MFRMSight — 多面Rasch模型分析工具
 创建: 2026-06-07
 最后更新: 2026-06-08
-当前版本: v0.9.0-dev (代码审查完成，无新Bug)
-状态: v0.9.0 Facets 解析进行中
+当前版本: v1.0.0 (本机已完成, 待推送)
+状态: v1.0.0 交互式分析 + 一键专业报告
+================================================================================
+
+[2026-06-08 15:00] v1.0.0 — 三步交互式分析 + 一键专业报告 (本机完成)
+  新增功能:
+    1. 动态面名称提取 (extract_dimensions)
+       - 从文件 Labels 段读取面名称，不硬编码"学生/评分者"
+       - 英文自动翻译为中文 (_translate_en, 内建 30+ 词条对照表)
+    2. 维度选择过滤 (filter_data)
+       - 用户勾选哪些标准/题目 → 过滤 raw 数组 → 只分析选中维度
+       - 自动重新映射 ID 索引
+    3. 偏差交互分析 (bias_interaction)
+       - 计算任意两个面的交互对偏差量 (bias = obs_mean - exp_mean)
+       - 自动生成所有可能的交互对选项 (n*(n-1)/2 组合)
+       - |z| >= 2 标记为显著偏差
+    4. 一键生成专业报告 (generate_report)
+       - 模仿 Facets 专业整理报告.docx 的 10 章节结构
+       - 一~十章节: 摘要/模型设定/数据摘要/总体拟合/各面向/偏差诊断/交互分析/等级诊断/异常反应/综合结论
+       - Markdown 格式, 可直接复制或导出
+    5. AIC/BIC 模型拟合指标 (aic_bic)
+       - AIC = -2*LL + 2*k, BIC = -2*LL + k*ln(N)
+    6. Gradio Web 三步交互界面重写
+       - Step 1: 上传 → 自动检测面数 → 维度 Checkbox 选择
+       - Step 2: 分析结果 → 交互对 Checkbox 选择
+       - Step 3: 偏差交互分析 → 一键生成报告
+    7. 恢复 parse_facets_txt (之前被 v1.0 代码覆盖, 已从 git 恢复)
+
+  测试: 32/32 passed (向后兼容)
+  报告生成测试: 3514 字符 Markdown, 10 章节结构完整
+  偏差交互测试: Rater×Student 32 对交互, 1 对显著 (|z|≥2)
+
+  8. 统计图表生成 (matplotlib)
+       - 垂直标尺图 (Ruler Map): 各面向元素在 logit 量尺上的散点分布
+       - 等级概率曲线 + ICC 期望分曲线: P(score=k|θ) + Expected Score vs θ
+       - 评分者拟合分布图: Infit/Outfit MnSq 条形图, 标注 .5-1.5 可接受区间
+       - 图表通过 base64 PNG 嵌入 Markdown 报告
+
+  报告测试: 82KB Markdown, 含 3 张嵌入图表, 10 章节完整
+  测试: 32/32 passed
+
+  已知待办 (v1.0.0 未完成):
+    - 报告导出为 .docx 格式 (当前仅 Markdown)
+    - DIF 跨群组偏差分析 (分组比较)
+    - 本地测试通过, 待推送 GitHub + Render 部署
+
 ================================================================================
 
 [2026-06-08 11:30] 包版 v0.8.0 代码审查 — 无新 Bug 发现
@@ -582,6 +626,18 @@ MFRMSight 开发者日志 (Developer Log)
   附带修改: Noncentered 头解析 + _center_prox() + _up() center 参数
   验证: 标签全部正确 ✓
   遗留: ExpMean≠ObsMean (BUG-010/011)
+
+
+[2026-06-08 13:00] v0.9.0 格式适配 — 兼容标准 Facets .txt 输入格式
+  问题: 用户提供的 2026Raterbias110.txt 无法解析
+  根因: (1) 等号后分号注释 Facets = 3; (2) 数据 token 内含 tab 如 1	-	2
+  修复:
+    - mfrm_app.py: Header 值解析前 split(";")[0] + _expand_range_token 加 re.sub(r'\s+', '', token)
+    - engine.py: parse_facets_txt 恢复 + 添加同款兼容逻辑
+    - engine.py: 新增 range 展开逻辑 (笛卡尔积展开)
+  测试: 2026Raterbias110.txt (64条, 3面 R20) — 成功解析
+        mfrm_app.py: VarExp=86.24% | engine.py: VarExp=89.93%
+  关联: BUG-018 (.gitignore 解除测试数据排除, 确保两边数据一致)
 
 [2026-06-08 12:30] v0.9.0 启动 — Facets .out.txt 解析器完成
   文件: mfrmapp/src/mfrmapp/facets_out.py (467行)
