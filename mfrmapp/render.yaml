@@ -6,7 +6,7 @@ services:
     name: mfrmsight
     runtime: python
     plan: free
-    buildCommand: cd src && pip install uv && uv sync --no-dev
+    buildCommand: cd mfrmapp && pip install uv && uv sync --no-dev
     startCommand: uv run mfrmapp-gradio
     envVars:
       - key: PORT
