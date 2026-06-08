@@ -17,10 +17,6 @@ venv/
 .DS_Store
 Thumbs.db
 
-# MFRM 数据文件（太大，不上传）
-*.out.txt
-2026Raterbias10.txt
-
 # 临时文件
 *.tmp
 temp/
