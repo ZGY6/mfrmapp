@@ -1,0 +1,12 @@
+2026-06-07 18:49:37.252 No ASGI app assignments found in C:\Users\zgy78\Desktop\mfrm_project\mfrmapp\src\mfrmapp\web\app.py
+2026-06-07 18:49:37.352 Filtered 83 packages down to 1 candidates for component scanning
+2026-06-07 18:49:37.352 Scanning 1 candidate packages for component manifests using 1 worker threads
+2026-06-07 18:49:37.397 Found 0 component manifests total
+2026-06-07 18:49:37.397 No asset roots to watch
+2026-06-07 18:49:37.397 File watching not started
+2026-06-07 18:49:37.397 Starting new event loop for server
+2026-06-07 18:49:37.398 Starting server...
+2026-06-07 18:49:37.426 Starting uvicorn server on 0.0.0.0:8606
+2026-06-07 18:49:37.448 Runtime state: RuntimeState.INITIAL -> RuntimeState.NO_SESSIONS_CONNECTED
+2026-06-07 18:49:37.450 Uvicorn server started on 0.0.0.0:8606
+2026-06-07 18:49:37.775 Setting up signal handler

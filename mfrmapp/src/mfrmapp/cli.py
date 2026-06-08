@@ -6,7 +6,7 @@ from .engine import parse_facets_txt, parse_excel, MFRMEngine
 
 def main():
     ap = argparse.ArgumentParser(
-        description="MFRMSight v0.2 — 多面Rasch模型分析工具",
+        description="MFRMSight v0.8.0 — 多面Rasch模型分析工具",
         epilog="示例: mfrmapp data.txt -o result.xlsx")
     ap.add_argument("input", help="输入文件 (.txt 或 .xlsx)")
     ap.add_argument("-o", "--output", help="输出文件 (.xlsx / .docx)")

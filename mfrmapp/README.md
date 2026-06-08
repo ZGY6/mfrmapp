@@ -1,4 +1,4 @@
-# MFRMSight — 多面Rasch模型分析工具 v0.2
+# MFRMSight — 多面Rasch模型分析工具 v0.8.0
 
 基于Andrich Rating Scale Model (1978)，使用Fisher-scoring JMLE进行参数估计。
 

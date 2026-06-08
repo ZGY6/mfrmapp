@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mfrmapp"
-version = "0.2.0"
+version = "0.7.0"
 description = "MFRMSight — 多面Rasch模型分析工具"
 readme = "README.md"
 license = "MIT"
@@ -26,6 +26,7 @@ dependencies = [
     "pandas>=2.0",
     "scipy>=1.10",
     "openpyxl>=3.0",
+    "gradio>=4.0",
 ]
 [project.optional-dependencies]
 word = ["python-docx>=1.0"]
@@ -33,6 +34,8 @@ plot = ["matplotlib>=3.7"]
 
 [project.scripts]
 mfrmapp = "mfrmapp.cli:main"
+mfrmapp-web = "mfrmapp.web.run:main"
+mfrmapp-gradio = "mfrmapp.web.app_gradio:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/mfrmapp"]
