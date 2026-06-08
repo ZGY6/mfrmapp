@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mfrmapp"
-version = "0.7.0"
+version = "0.8.0"
 description = "MFRMSight — 多面Rasch模型分析工具"
 readme = "README.md"
 license = "MIT"
