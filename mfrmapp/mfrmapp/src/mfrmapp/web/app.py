@@ -142,7 +142,7 @@ if uploaded:
             csv_buf.write(all_df.to_csv(index=False).encode("utf-8-sig"))
             st.download_button("📥 CSV", csv_buf.getvalue(), "mfrm_result.csv", "text/csv")
 
-        st.caption("MFRMSight v0.8.0 · Andrich Rating Scale Model · Fisher-scoring JMLE")
+        st.caption("MFRMSight v1.0.12 · Andrich Rating Scale Model · Fisher-scoring JMLE")
 
     except Exception as e:
         st.error(f"分析失败: {e}")

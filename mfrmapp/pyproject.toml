@@ -4,22 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mfrmapp"
-version = "0.8.0"
-description = "MFRMSight — 多面Rasch模型分析工具"
-readme = "README.md"
-license = "MIT"
-authors = [{name = "zgy78", email = "zgy78@ruc.edu.cn"}]
-keywords = ["rasch", "mfrm", "psychometrics", "item-response-theory"]
-classifiers = [
-    "Development Status :: 3 - Alpha",
-    "Intended Audience :: Science/Research",
-    "Topic :: Scientific/Engineering",
-    "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
-    "Programming Language :: Python :: 3.13",
-]
+version = "1.0.12"
 requires-python = ">=3.10"
 dependencies = [
     "numpy>=1.24",
@@ -27,25 +12,13 @@ dependencies = [
     "scipy>=1.10",
     "openpyxl>=3.0",
     "gradio>=4.0",
-    "matplotlib>=3.10.9",
-    "pillow>=12.2.0",
-    "python-docx>=1.2.0",
+    "matplotlib>=3.7",
+    "Pillow>=9.0",
+    "python-docx>=1.0",
 ]
-[project.optional-dependencies]
-word = ["python-docx>=1.0"]
-plot = ["matplotlib>=3.7"]
-web = ["streamlit>=1.28"]
-test = ["pytest>=8.0"]
 
 [project.scripts]
-mfrmapp = "mfrmapp.cli:main"
-mfrmapp-web = "mfrmapp.web.run:main"
 mfrmapp-gradio = "mfrmapp.web.app_gradio:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/mfrmapp"]
-
-[dependency-groups]
-dev = [
-    "pytest>=9.0.3",
-]
+packages = ["mfrmapp/src/mfrmapp"]
