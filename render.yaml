@@ -1,0 +1,15 @@
+# MFRMSight — Render 部署配置
+# 文档: https://render.com/docs/blueprint-spec
+
+services:
+  - type: web
+    name: mfrmsight
+    runtime: python
+    plan: free
+    buildCommand: pip install uv && uv sync --no-dev
+    startCommand: uv run mfrmapp-gradio
+    envVars:
+      - key: PORT
+        value: 7860
+      - key: GRADIO_VERSION_CHECK
+        value: "false"
