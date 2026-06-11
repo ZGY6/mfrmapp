@@ -19,4 +19,4 @@ dependencies = [
 mfrmapp-gradio = "mfrmapp.web.app_gradio:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["mfrmapp/src/mfrmapp"]
+packages = ["mfrmapp/mfrmapp/src/mfrmapp"]
